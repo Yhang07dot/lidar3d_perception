@@ -24,22 +24,28 @@ def launch_setup(context, *args, **kwargs):
     bag_dir = LaunchConfiguration('bag_dir').perform(context)
     rate = LaunchConfiguration('rate').perform(context)
     start_offset = LaunchConfiguration('start_offset').perform(context)
+    loop = LaunchConfiguration('loop').perform(context)
 
     bag_dir = os.path.expanduser(bag_dir)
 
     pkg_share = get_package_share_directory('lidar3d_bringup')
     rviz_config = os.path.join(pkg_share, 'rviz', 'lidar3d.rviz')
 
+    # Build rosbag play command
+    rosbag_cmd = [
+        'ros2', 'bag', 'play', bag_dir,
+        '--rate', rate,
+        '--start-offset', start_offset,
+        '--clock',
+        '--read-ahead-queue-size', '200',
+    ]
+    if loop.lower() == 'true':
+        rosbag_cmd.append('--loop')
+
     return [
-        # --- rosbag play (ExecuteProcess: ros2 bag play --clock) ---
+        # --- rosbag play ---
         ExecuteProcess(
-            cmd=[
-                'ros2', 'bag', 'play', bag_dir,
-                '--rate', rate,
-                '--start-offset', start_offset,
-                '--clock',
-                '--read-ahead-queue-size', '200',
-            ],
+            cmd=rosbag_cmd,
             output='screen',
         ),
 
@@ -80,6 +86,11 @@ def generate_launch_description():
             'start_offset',
             default_value='0.0',
             description='Seconds to skip from beginning',
+        ),
+        DeclareLaunchArgument(
+            'loop',
+            default_value='true',
+            description='Loop playback (true/false)',
         ),
         OpaqueFunction(function=launch_setup),
     ])

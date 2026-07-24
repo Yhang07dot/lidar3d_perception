@@ -20,9 +20,9 @@ Visualization Manager:
         Reliability Policy: Best Effort
         Value: /cx/lslidar_point_cloud
       Style: Points
-      Size (Pixels): 2
-      Size (m): 0.05
-      Decay Time: 3
+      Size (Pixels): 1
+      Size (m): 0.03
+      Decay Time: 1
       Color Transformer: Intensity
       Invert Rainbow: false
       Min Intensity: 0
