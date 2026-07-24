@@ -22,7 +22,7 @@ Visualization Manager:
       Style: Points
       Size (Pixels): 2
       Size (m): 0.05
-      Decay Time: 0.3
+      Decay Time: 3
       Color Transformer: Intensity
       Invert Rainbow: false
       Min Intensity: 0
