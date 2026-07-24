@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
 """
-Launch file for rosbag playback with TF publishing and rviz2 visualization.
+Launch file for rosbag playback, TF, filter, ground segmentation, and rviz2.
 
 Usage:
     ros2 launch lidar3d_bringup play_and_viz.launch.py
-
-Arguments:
-    bag_dir:  path to rosbag directory (default: ~/lidar3d_ws/bags)
-    rate:     playback rate (default: 1.0)
-    start_offset: seconds to skip from beginning (default: 0.0)
-    use_sim_time: use /clock from rosbag (default: True)
+    ros2 launch lidar3d_bringup play_and_viz.launch.py sensor_height:=1.2
+    ros2 launch lidar3d_bringup play_and_viz.launch.py enable_ground_seg:=false
 """
 
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -25,6 +22,7 @@ def launch_setup(context, *args, **kwargs):
     rate = LaunchConfiguration('rate').perform(context)
     start_offset = LaunchConfiguration('start_offset').perform(context)
     loop = LaunchConfiguration('loop').perform(context)
+    sensor_height = LaunchConfiguration('sensor_height').perform(context)
 
     bag_dir = os.path.expanduser(bag_dir)
 
@@ -42,8 +40,7 @@ def launch_setup(context, *args, **kwargs):
     if loop.lower() == 'true':
         rosbag_cmd.append('--loop')
 
-    # --- Build filter node params: only pass if user overrode via CLI ---
-    # Sentinel: '__default__' means "use the node's own declare_parameter default"
+    # --- Build filter node params ---
     filter_params = {'use_sim_time': True}
     overrides = {
         'max_range': LaunchConfiguration('max_range').perform(context),
@@ -71,13 +68,31 @@ def launch_setup(context, *args, **kwargs):
             parameters=[{'use_sim_time': True}],
         ),
 
-        # --- PointCloud filter ---
+        # --- PointCloud filter (distance + height) ---
         Node(
             package='lidar3d_bringup',
             executable='pointcloud_filter',
             name='pointcloud_filter',
             output='screen',
             parameters=[filter_params],
+        ),
+
+        # --- Patchwork++ ground segmentation ---
+        Node(
+            package='patchworkpp',
+            executable='patchworkpp_node',
+            name='patchworkpp_node',
+            output='screen',
+            remappings=[('pointcloud_topic', '/cx/lslidar_point_cloud_filtered')],
+            parameters=[{
+                'use_sim_time': True,
+                'base_frame': 'base_link',
+                'sensor_height': float(sensor_height),
+                'max_range': 50.0,
+                'min_range': 1.0,
+                'verbose': False,
+            }],
+            condition=IfCondition(LaunchConfiguration('enable_ground_seg')),
         ),
 
         # --- rviz2 ---
@@ -117,22 +132,32 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'max_range',
             default_value='__default__',
-            description='Max detection distance (m). Default: use value from pointcloud_filter.py',
+            description='Filter max distance (m)',
         ),
         DeclareLaunchArgument(
             'min_range',
             default_value='__default__',
-            description='Min detection distance (m). Default: use value from pointcloud_filter.py',
+            description='Filter min distance (m)',
         ),
         DeclareLaunchArgument(
             'min_height',
             default_value='__default__',
-            description='Min Z height (m). Default: use value from pointcloud_filter.py',
+            description='Filter min Z height (m)',
         ),
         DeclareLaunchArgument(
             'max_height',
             default_value='__default__',
-            description='Max Z height (m). Default: use value from pointcloud_filter.py',
+            description='Filter max Z height (m)',
+        ),
+        DeclareLaunchArgument(
+            'sensor_height',
+            default_value='1.5',
+            description='LiDAR height above ground (m) for Patchwork++',
+        ),
+        DeclareLaunchArgument(
+            'enable_ground_seg',
+            default_value='true',
+            description='Enable Patchwork++ ground segmentation (true/false)',
         ),
         OpaqueFunction(function=launch_setup),
     ])
