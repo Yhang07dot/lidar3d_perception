@@ -1,3 +1,4 @@
 [console_scripts]
+pointcloud_filter = lidar3d_bringup.pointcloud_filter:main
 tf_publisher = lidar3d_bringup.tf_publisher:main
 

@@ -9,7 +9,7 @@ Visualization Manager:
     - Class: rviz_default_plugins/TF
       Name: TF
       Enabled: true
-      Frame Timeout: 15
+      Frame Timeout: 10
       All Enabled: true
     - Class: rviz_default_plugins/PointCloud2
       Name: LiDAR PointCloud
@@ -18,15 +18,15 @@ Visualization Manager:
         Depth: 5
         Durability Policy: Volatile
         Reliability Policy: Best Effort
-        Value: /cx/lslidar_point_cloud
+        Value: /cx/lslidar_point_cloud_filtered
       Style: Points
-      Size (Pixels): 3
-      Size (m): 0.05
-      Decay Time: 1
+      Size (Pixels): 2
+      Size (m): 0.03
+      Decay Time: 0.8
       Color Transformer: Z Value
       Invert Rainbow: false
       Min Intensity: -2
-      Max Intensity: 2
+      Max Intensity: 3
       Selectable: true
     - Class: rviz_default_plugins/Odometry
       Name: Chcnav Odometry
@@ -48,7 +48,7 @@ Visualization Manager:
   Global Options:
     Background Color: 48; 48; 48
     Fixed Frame: odom
-    Frame Rate: 30
+    Frame Rate: 90
   Tools:
     - Class: rviz_default_plugins/MoveCamera
     - Class: rviz_default_plugins/Select

@@ -25,6 +25,10 @@ def launch_setup(context, *args, **kwargs):
     rate = LaunchConfiguration('rate').perform(context)
     start_offset = LaunchConfiguration('start_offset').perform(context)
     loop = LaunchConfiguration('loop').perform(context)
+    max_range = LaunchConfiguration('max_range').perform(context)
+    min_range = LaunchConfiguration('min_range').perform(context)
+    min_height = LaunchConfiguration('min_height').perform(context)
+    max_height = LaunchConfiguration('max_height').perform(context)
 
     bag_dir = os.path.expanduser(bag_dir)
 
@@ -56,6 +60,21 @@ def launch_setup(context, *args, **kwargs):
             name='tf_publisher',
             output='screen',
             parameters=[{'use_sim_time': True}],
+        ),
+
+        # --- PointCloud filter (range + height) ---
+        Node(
+            package='lidar3d_bringup',
+            executable='pointcloud_filter',
+            name='pointcloud_filter',
+            output='screen',
+            parameters=[{
+                'use_sim_time': True,
+                'max_range': float(max_range),
+                'min_range': float(min_range),
+                'min_height': float(min_height),
+                'max_height': float(max_height),
+            }],
         ),
 
         # --- rviz2 ---
@@ -91,6 +110,26 @@ def generate_launch_description():
             'loop',
             default_value='true',
             description='Loop playback (true/false)',
+        ),
+        DeclareLaunchArgument(
+            'max_range',
+            default_value='50.0',
+            description='Max detection distance (m)',
+        ),
+        DeclareLaunchArgument(
+            'min_range',
+            default_value='0.5',
+            description='Min detection distance (m), filters self-vehicle',
+        ),
+        DeclareLaunchArgument(
+            'min_height',
+            default_value='-2.0',
+            description='Min Z height in laser_link frame (m)',
+        ),
+        DeclareLaunchArgument(
+            'max_height',
+            default_value='3.0',
+            description='Max Z height in laser_link frame (m)',
         ),
         OpaqueFunction(function=launch_setup),
     ])
