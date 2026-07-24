@@ -25,10 +25,10 @@ class PointCloudFilter(Node):
         super().__init__('pointcloud_filter')
 
         # ——— Tunable parameters ———
-        self.declare_parameter('max_range', 50.0)
-        self.declare_parameter('min_range', 0.5)
-        self.declare_parameter('min_height', -2.0)
-        self.declare_parameter('max_height', 3.0)
+        self.declare_parameter('max_range', 1.0)
+        self.declare_parameter('min_range', 0.1)
+        self.declare_parameter('min_height', 0.0)
+        self.declare_parameter('max_height', 0.8)
 
         # Read initial values
         self.max_range = self.get_parameter('max_range').value

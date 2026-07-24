@@ -25,10 +25,6 @@ def launch_setup(context, *args, **kwargs):
     rate = LaunchConfiguration('rate').perform(context)
     start_offset = LaunchConfiguration('start_offset').perform(context)
     loop = LaunchConfiguration('loop').perform(context)
-    max_range = LaunchConfiguration('max_range').perform(context)
-    min_range = LaunchConfiguration('min_range').perform(context)
-    min_height = LaunchConfiguration('min_height').perform(context)
-    max_height = LaunchConfiguration('max_height').perform(context)
 
     bag_dir = os.path.expanduser(bag_dir)
 
@@ -46,6 +42,19 @@ def launch_setup(context, *args, **kwargs):
     if loop.lower() == 'true':
         rosbag_cmd.append('--loop')
 
+    # --- Build filter node params: only pass if user overrode via CLI ---
+    # Sentinel: '__default__' means "use the node's own declare_parameter default"
+    filter_params = {'use_sim_time': True}
+    overrides = {
+        'max_range': LaunchConfiguration('max_range').perform(context),
+        'min_range': LaunchConfiguration('min_range').perform(context),
+        'min_height': LaunchConfiguration('min_height').perform(context),
+        'max_height': LaunchConfiguration('max_height').perform(context),
+    }
+    for key, val in overrides.items():
+        if val != '__default__':
+            filter_params[key] = float(val)
+
     return [
         # --- rosbag play ---
         ExecuteProcess(
@@ -62,19 +71,13 @@ def launch_setup(context, *args, **kwargs):
             parameters=[{'use_sim_time': True}],
         ),
 
-        # --- PointCloud filter (range + height) ---
+        # --- PointCloud filter ---
         Node(
             package='lidar3d_bringup',
             executable='pointcloud_filter',
             name='pointcloud_filter',
             output='screen',
-            parameters=[{
-                'use_sim_time': True,
-                'max_range': float(max_range),
-                'min_range': float(min_range),
-                'min_height': float(min_height),
-                'max_height': float(max_height),
-            }],
+            parameters=[filter_params],
         ),
 
         # --- rviz2 ---
@@ -113,23 +116,23 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'max_range',
-            default_value='50.0',
-            description='Max detection distance (m)',
+            default_value='__default__',
+            description='Max detection distance (m). Default: use value from pointcloud_filter.py',
         ),
         DeclareLaunchArgument(
             'min_range',
-            default_value='0.5',
-            description='Min detection distance (m), filters self-vehicle',
+            default_value='__default__',
+            description='Min detection distance (m). Default: use value from pointcloud_filter.py',
         ),
         DeclareLaunchArgument(
             'min_height',
-            default_value='-2.0',
-            description='Min Z height in laser_link frame (m)',
+            default_value='__default__',
+            description='Min Z height (m). Default: use value from pointcloud_filter.py',
         ),
         DeclareLaunchArgument(
             'max_height',
-            default_value='3.0',
-            description='Max Z height in laser_link frame (m)',
+            default_value='__default__',
+            description='Max Z height (m). Default: use value from pointcloud_filter.py',
         ),
         OpaqueFunction(function=launch_setup),
     ])
