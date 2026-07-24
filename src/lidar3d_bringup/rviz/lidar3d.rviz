@@ -20,13 +20,13 @@ Visualization Manager:
         Reliability Policy: Best Effort
         Value: /cx/lslidar_point_cloud
       Style: Points
-      Size (Pixels): 1
-      Size (m): 0.03
+      Size (Pixels): 3
+      Size (m): 0.05
       Decay Time: 1
-      Color Transformer: Intensity
+      Color Transformer: Z Value
       Invert Rainbow: false
-      Min Intensity: 0
-      Max Intensity: 256
+      Min Intensity: -2
+      Max Intensity: 2
       Selectable: true
     - Class: rviz_default_plugins/Odometry
       Name: Chcnav Odometry
