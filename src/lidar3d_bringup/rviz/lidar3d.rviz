@@ -1,0 +1,56 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Frame Timeout: 15
+      All Enabled: true
+    - Class: rviz_default_plugins/PointCloud2
+      Name: LiDAR PointCloud
+      Enabled: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Best Effort
+        Value: /cx/lslidar_point_cloud
+      Style: Points
+      Size (Pixels): 2
+      Size (m): 0.05
+      Decay Time: 0.3
+      Color Transformer: Intensity
+      Invert Rainbow: false
+      Min Intensity: 0
+      Max Intensity: 256
+      Selectable: true
+    - Class: rviz_default_plugins/Odometry
+      Name: Chcnav Odometry
+      Enabled: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Best Effort
+        Value: /chcnav/odom
+      Keep: 100
+      Shape: Arrow
+      Color: 255; 255; 0
+      Alpha: 0.7
+      Shaft Length: 1.0
+      Shaft Radius: 0.1
+      Head Length: 0.3
+      Head Radius: 0.2
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: odom
+    Frame Rate: 30
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure

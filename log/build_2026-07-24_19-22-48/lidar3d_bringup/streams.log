@@ -1,0 +1,17 @@
+[0.589s] Invoking command in '/home/yaoh/lidar3d_ws/build/lidar3d_bringup': PYTHONPATH=/home/yaoh/lidar3d_ws/build/lidar3d_bringup/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/yaoh/lidar3d_ws/install/lidar3d_bringup/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/yaoh/lidar3d_ws/build/lidar3d_bringup/build --no-deps symlink_data
+[0.754s] running develop
+[0.848s] running egg_info
+[0.848s] writing lidar3d_bringup.egg-info/PKG-INFO
+[0.848s] writing dependency_links to lidar3d_bringup.egg-info/dependency_links.txt
+[0.848s] writing entry points to lidar3d_bringup.egg-info/entry_points.txt
+[0.848s] writing requirements to lidar3d_bringup.egg-info/requires.txt
+[0.848s] writing top-level names to lidar3d_bringup.egg-info/top_level.txt
+[0.850s] reading manifest file 'lidar3d_bringup.egg-info/SOURCES.txt'
+[0.851s] writing manifest file 'lidar3d_bringup.egg-info/SOURCES.txt'
+[0.851s] running build_ext
+[0.852s] Creating /home/yaoh/lidar3d_ws/install/lidar3d_bringup/lib/python3.10/site-packages/lidar3d-bringup.egg-link (link to .)
+[0.852s] Installing tf_publisher script to /home/yaoh/lidar3d_ws/install/lidar3d_bringup/lib/lidar3d_bringup
+[0.852s] 
+[0.852s] Installed /home/yaoh/lidar3d_ws/build/lidar3d_bringup
+[0.852s] running symlink_data
+[0.879s] Invoked command in '/home/yaoh/lidar3d_ws/build/lidar3d_bringup' returned '0': PYTHONPATH=/home/yaoh/lidar3d_ws/build/lidar3d_bringup/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/yaoh/lidar3d_ws/install/lidar3d_bringup/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/yaoh/lidar3d_ws/build/lidar3d_bringup/build --no-deps symlink_data

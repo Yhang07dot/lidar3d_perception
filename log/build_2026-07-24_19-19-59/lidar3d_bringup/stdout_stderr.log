@@ -1,0 +1,15 @@
+running develop
+running egg_info
+writing lidar3d_bringup.egg-info/PKG-INFO
+writing dependency_links to lidar3d_bringup.egg-info/dependency_links.txt
+writing entry points to lidar3d_bringup.egg-info/entry_points.txt
+writing requirements to lidar3d_bringup.egg-info/requires.txt
+writing top-level names to lidar3d_bringup.egg-info/top_level.txt
+reading manifest file 'lidar3d_bringup.egg-info/SOURCES.txt'
+writing manifest file 'lidar3d_bringup.egg-info/SOURCES.txt'
+running build_ext
+Creating /home/yaoh/lidar3d_ws/install/lidar3d_bringup/lib/python3.10/site-packages/lidar3d-bringup.egg-link (link to .)
+Installing tf_publisher script to /home/yaoh/lidar3d_ws/install/lidar3d_bringup/lib/lidar3d_bringup
+
+Installed /home/yaoh/lidar3d_ws/build/lidar3d_bringup
+running symlink_data

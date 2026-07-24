@@ -1,0 +1,3 @@
+[console_scripts]
+tf_publisher = lidar3d_bringup.tf_publisher:main
+
