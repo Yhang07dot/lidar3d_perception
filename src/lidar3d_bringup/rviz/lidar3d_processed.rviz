@@ -42,13 +42,21 @@ Visualization Manager:
       Color: 255; 0; 0
       Selectable: true
     - Class: rviz_default_plugins/MarkerArray
-      Name: Clusters (聚类框)
+      Name: Obstacle Boxes (包围框)
       Enabled: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
         Reliability Policy: Reliable
-        Value: /clusters/markers
+        Value: /obstacles/boxes
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Obstacle Centers (质心)
+      Enabled: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        Value: /obstacles/centers
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48

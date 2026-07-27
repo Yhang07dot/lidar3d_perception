@@ -117,6 +117,16 @@ def launch_setup(context, *args, **kwargs):
             condition=IfCondition(LaunchConfiguration('enable_ground_seg')),
         ),
 
+        # --- Real bounding boxes from /clusters/points ---
+        Node(
+            package='lidar3d_bringup',
+            executable='cluster_bbox',
+            name='cluster_bbox',
+            output='screen',
+            parameters=[{'use_sim_time': True}],
+            condition=IfCondition(LaunchConfiguration('enable_ground_seg')),
+        ),
+
         # --- rviz2 窗口1: 原始过滤点云（参考窗）---
         Node(
             package='rviz2',

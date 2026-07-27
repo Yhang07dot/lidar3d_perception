@@ -3,6 +3,7 @@ setup.cfg
 setup.py
 launch/play_and_viz.launch.py
 lidar3d_bringup/__init__.py
+lidar3d_bringup/cluster_bbox.py
 lidar3d_bringup/cluster_listener.py
 lidar3d_bringup/pointcloud_filter.py
 lidar3d_bringup/tf_publisher.py
