@@ -21,3 +21,5 @@ lidar3d_bringup.egg-info/top_level.txt
 lidar3d_bringup.egg-info/zip-safe
 resource/lidar3d_bringup
 rviz/lidar3d.rviz
+rviz/lidar3d_processed.rviz
+rviz/lidar3d_raw.rviz

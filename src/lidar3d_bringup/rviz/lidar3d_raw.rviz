@@ -12,7 +12,7 @@ Visualization Manager:
       Frame Timeout: 10
       All Enabled: true
     - Class: rviz_default_plugins/PointCloud2
-      Name: LiDAR PointCloud
+      Name: LiDAR Filtered (参考)
       Enabled: true
       Topic:
         Depth: 5
@@ -27,36 +27,6 @@ Visualization Manager:
       Invert Rainbow: false
       Min Intensity: -2
       Max Intensity: 3
-      Selectable: true
-    - Class: rviz_default_plugins/PointCloud2
-      Name: Ground (Patchwork++)
-      Enabled: true
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        Reliability Policy: Best Effort
-        Value: /patchworkpp/ground
-      Style: Points
-      Size (Pixels): 2
-      Size (m): 0.03
-      Decay Time: 0.8
-      Color Transformer: FlatColor
-      Color: 0; 255; 0
-      Selectable: true
-    - Class: rviz_default_plugins/PointCloud2
-      Name: Obstacles (Patchwork++)
-      Enabled: true
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        Reliability Policy: Best Effort
-        Value: /patchworkpp/nonground
-      Style: Points
-      Size (Pixels): 2
-      Size (m): 0.03
-      Decay Time: 0.8
-      Color Transformer: FlatColor
-      Color: 255; 0; 0
       Selectable: true
     - Class: rviz_default_plugins/Odometry
       Name: Chcnav Odometry
@@ -78,7 +48,7 @@ Visualization Manager:
   Global Options:
     Background Color: 48; 48; 48
     Fixed Frame: odom
-    Frame Rate: 60
+    Frame Rate: 30
   Tools:
     - Class: rviz_default_plugins/MoveCamera
     - Class: rviz_default_plugins/Select

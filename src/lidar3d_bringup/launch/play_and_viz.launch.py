@@ -27,7 +27,8 @@ def launch_setup(context, *args, **kwargs):
     bag_dir = os.path.expanduser(bag_dir)
 
     pkg_share = get_package_share_directory('lidar3d_bringup')
-    rviz_config = os.path.join(pkg_share, 'rviz', 'lidar3d.rviz')
+    rviz_raw = os.path.join(pkg_share, 'rviz', 'lidar3d_raw.rviz')
+    rviz_proc = os.path.join(pkg_share, 'rviz', 'lidar3d_processed.rviz')
 
     # Build rosbag play command
     rosbag_cmd = [
@@ -95,12 +96,22 @@ def launch_setup(context, *args, **kwargs):
             condition=IfCondition(LaunchConfiguration('enable_ground_seg')),
         ),
 
-        # --- rviz2 ---
+        # --- rviz2 窗口1: 原始过滤点云（参考窗）---
         Node(
             package='rviz2',
             executable='rviz2',
-            name='rviz2',
-            arguments=['-d', rviz_config],
+            name='rviz2_raw',
+            arguments=['-d', rviz_raw],
+            parameters=[{'use_sim_time': True}],
+            output='screen',
+        ),
+
+        # --- rviz2 窗口2: 处理后点云（检测窗，地面绿+障碍红）---
+        Node(
+            package='rviz2',
+            executable='rviz2',
+            name='rviz2_proc',
+            arguments=['-d', rviz_proc],
             parameters=[{'use_sim_time': True}],
             output='screen',
         ),
