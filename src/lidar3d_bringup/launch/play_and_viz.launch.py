@@ -96,6 +96,27 @@ def launch_setup(context, *args, **kwargs):
             condition=IfCondition(LaunchConfiguration('enable_ground_seg')),
         ),
 
+        # --- Obstacle clustering (euclidean_grid) ---
+        Node(
+            package='lidar_cluster',
+            executable='euclidean_grid',
+            name='euclidean_grid',
+            output='screen',
+            parameters=[{
+                'use_sim_time': True,
+                'points_in_topic': '/patchworkpp/nonground',
+                'points_out_topic': '/clusters/points',
+                'marker_out_topic': '/clusters/markers',
+                'tolerance': 0.5,
+                'voxel_leaf_size': 0.1,
+                'min_points_number_per_voxel': 3,
+                'max_cluster_size': 50000,
+                'verbose1': False,
+                'verbose2': False,
+            }],
+            condition=IfCondition(LaunchConfiguration('enable_ground_seg')),
+        ),
+
         # --- rviz2 窗口1: 原始过滤点云（参考窗）---
         Node(
             package='rviz2',

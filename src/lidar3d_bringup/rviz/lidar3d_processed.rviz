@@ -41,6 +41,14 @@ Visualization Manager:
       Color Transformer: FlatColor
       Color: 255; 0; 0
       Selectable: true
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Clusters (聚类框)
+      Enabled: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        Value: /clusters/markers
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
