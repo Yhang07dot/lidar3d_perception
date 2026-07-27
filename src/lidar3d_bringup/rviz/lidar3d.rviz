@@ -39,7 +39,7 @@ Visualization Manager:
       Style: Points
       Size (Pixels): 2
       Size (m): 0.03
-      Decay Time: 1
+      Decay Time: 0.8
       Color Transformer: FlatColor
       Color: 0; 255; 0
       Selectable: true
@@ -54,7 +54,7 @@ Visualization Manager:
       Style: Points
       Size (Pixels): 2
       Size (m): 0.03
-      Decay Time: 1
+      Decay Time: 0.8
       Color Transformer: FlatColor
       Color: 255; 0; 0
       Selectable: true

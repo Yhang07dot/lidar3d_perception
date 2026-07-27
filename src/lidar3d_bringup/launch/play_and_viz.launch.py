@@ -86,7 +86,7 @@ def launch_setup(context, *args, **kwargs):
             remappings=[('pointcloud_topic', '/cx/lslidar_point_cloud_filtered')],
             parameters=[{
                 'use_sim_time': True,
-                'base_frame': 'base_link',
+                'base_frame': 'laser_link',
                 'sensor_height': float(sensor_height),
                 'max_range': 50.0,
                 'min_range': 1.0,
