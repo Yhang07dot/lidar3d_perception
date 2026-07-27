@@ -35,7 +35,7 @@ Visualization Manager:
         Reliability Policy: Best Effort
         Value: /patchworkpp/nonground
       Style: Points
-      Size (Pixels): 3
+      Size (Pixels): 2
       Size (m): 0.05
       Decay Time: 0.8
       Color Transformer: FlatColor

@@ -31,6 +31,7 @@ setup(
         'console_scripts': [
             'tf_publisher = lidar3d_bringup.tf_publisher:main',
             'pointcloud_filter = lidar3d_bringup.pointcloud_filter:main',
+            'cluster_listener = lidar3d_bringup.cluster_listener:main',
         ],
     },
 )
