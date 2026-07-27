@@ -10,6 +10,13 @@ source ~/lidar3d_ws/install/setup.bash
 ros2 launch lidar3d_bringup play_and_viz.launch.py
 ```
 
+  启动 pipeline 后，另开终端运行 listener：
+
+  source /opt/ros/humble/setup.bash
+  source ~/lidar3d_ws/install/setup.bash
+  ros2 run lidar3d_bringup cluster_listener --ros-args -p use_sim_time:=true
+
+
 ## 项目结构
 
 ```
