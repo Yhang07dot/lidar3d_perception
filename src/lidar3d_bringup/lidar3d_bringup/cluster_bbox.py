@@ -24,6 +24,15 @@ class ClusterBBox(Node):
     def __init__(self):
         super().__init__('cluster_bbox')
 
+        # ——— Tunable filter parameters ———
+        self.declare_parameter('min_points', 5)
+        self.declare_parameter('min_dim', 0.10)
+        self.declare_parameter('max_dim', 15.0)
+
+        self.min_pts = self.get_parameter('min_points').value
+        self.min_dim = self.get_parameter('min_dim').value
+        self.max_dim = self.get_parameter('max_dim').value
+
         self.sub = self.create_subscription(
             PointCloud2,
             '/clusters/points',
@@ -73,10 +82,16 @@ class ClusterBBox(Node):
             min_pt = np.array([cx.min(), cy.min(), cz.min()])
             max_pt = np.array([cx.max(), cy.max(), cz.max()])
             centroid = (min_pt + max_pt) / 2.0
+            n_pts = mask.sum()
             dims = max_pt - min_pt
+            max_dim = dims.max()
 
-            # Skip degenerate clusters (zero-size or single-point lines)
-            if np.all(dims < 0.01):
+            # --- Filtering ---
+            if n_pts < self.min_pts:
+                continue
+            if max_dim < self.min_dim:
+                continue
+            if max_dim > self.max_dim:
                 continue
 
             # --- CUBE marker (axis-aligned bounding box) ---

@@ -1,6 +1,5 @@
 [console_scripts]
 cluster_bbox = lidar3d_bringup.cluster_bbox:main
-cluster_listener = lidar3d_bringup.cluster_listener:main
 pointcloud_filter = lidar3d_bringup.pointcloud_filter:main
 tf_publisher = lidar3d_bringup.tf_publisher:main
 
