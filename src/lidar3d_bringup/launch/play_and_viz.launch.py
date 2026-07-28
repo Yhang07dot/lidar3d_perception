@@ -127,6 +127,16 @@ def launch_setup(context, *args, **kwargs):
             condition=IfCondition(LaunchConfiguration('enable_ground_seg')),
         ),
 
+        # --- Obstacle adapter: classify + transform → /obstacle_markers ---
+        Node(
+            package='lidar3d_bringup',
+            executable='obstacle_adapter',
+            name='obstacle_adapter',
+            output='screen',
+            parameters=[{'use_sim_time': True}],
+            condition=IfCondition(LaunchConfiguration('enable_ground_seg')),
+        ),
+
         # --- rviz2 窗口1: 原始过滤点云（参考窗）---
         Node(
             package='rviz2',
