@@ -1,6 +1,7 @@
 build/
 install/
 log/
+outerData/
 __pycache__/
 *.pyc
 .env

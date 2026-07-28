@@ -1,1 +1,0 @@
-/home/yaoh/lidar3d_ws/build/lidar3d_bringup/launch/play_and_viz.launch.py
