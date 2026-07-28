@@ -41,7 +41,7 @@ class PointCloudFilter(Node):
 
         self.sub = self.create_subscription(
             PointCloud2,
-            '/cx/lslidar_point_cloud',
+            'input_cloud',  # remappable topic name
             self._callback,
             10,
         )
