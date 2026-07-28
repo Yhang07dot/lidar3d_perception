@@ -1,0 +1,38 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+- family-names: "Unger"
+  given-names: "Miklós"
+  orcid: "https://orcid.org/0000-0003-3518-1107"
+- family-names: "Horváth"
+  given-names: "Ernő"
+  orcid: "https://orcid.org/0000-0001-5083-2073"
+- family-names: "Pup"
+  given-names: "Dániel"
+  orcid: "https://orcid.org/0000-0003-2766-9655"
+- family-names: "Pozna"
+  given-names: "Claudiu Radu"
+  orcid: "https://orcid.org/0000-0002-0790-9343"
+title: "Towards Robust LIDAR Lane Clustering for Autonomous Vehicle Perception in ROS 2"
+version: "2024"
+doi: "10.1109/MOST60774.2024.00031"
+url: "https://github.com/jkk-research/lidar_cluster_ros2"
+preferred-citation:
+  type: article
+  authors:
+  - family-names: "Unger"
+    given-names: "Miklós"
+    orcid: "https://orcid.org/0000-0003-3518-1107"
+  - family-names: "Horváth"
+    given-names: "Ernő"
+    orcid: "https://orcid.org/0000-0001-5083-2073"
+  - family-names: "Pup"
+    given-names: "Dániel"
+    orcid: "https://orcid.org/0000-0003-2766-9655"
+  - family-names: "Pozna"
+    given-names: "Claudiu Radu"
+    orcid: "https://orcid.org/0000-0002-0790-9343"
+  doi: "10.1109/MOST60774.2024.00031"
+  title: "Towards Robust LIDAR Lane Clustering for Autonomous Vehicle Perception in ROS 2"
+  year: 2024
+  conference: "2024 IEEE International Conference on Mobility, Operations, Services and Technologies (IEEE MOST)"
