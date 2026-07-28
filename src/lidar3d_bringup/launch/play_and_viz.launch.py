@@ -21,14 +21,19 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration, PythonExpression
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
 def launch_setup(context, *args, **kwargs):
     # --- source params ---
     src = LaunchConfiguration('input_source').perform(context)
-    cloud_topic = LaunchConfiguration('cloud_topic').perform(context)
+    raw_topic = LaunchConfiguration('cloud_topic').perform(context)
+    # resolve __auto__ sentinel
+    if raw_topic == '__auto__':
+        cloud_topic = '/cx/lslidar_point_cloud' if src == 'rosbag' else '/lidar/points'
+    else:
+        cloud_topic = raw_topic
 
     # Use_ ROS bag params (only in rosbag mode)
     bag_dir = LaunchConfiguration('bag_dir').perform(context)
@@ -73,6 +78,15 @@ def launch_setup(context, *args, **kwargs):
     tf_node = Node(
         package='lidar3d_bringup', executable='tf_publisher',
         name='tf_publisher', output='screen',
+        parameters=[{'use_sim_time': True}],
+    )
+
+    # --- static TF: Gazebo frame → laser_link (sim/lidar modes) ---
+    static_tf_node = Node(
+        package='tf2_ros', executable='static_transform_publisher',
+        name='lidar_frame_bridge',
+        arguments=['0', '0', '0', '0', '0', '0',
+                   'baja_vehicle/base_link/lidar', 'laser_link'],
         parameters=[{'use_sim_time': True}],
     )
 
@@ -151,6 +165,9 @@ def launch_setup(context, *args, **kwargs):
     if is_rosbag:
         nodes.append(rosbag_node)
         nodes.append(tf_node)
+    else:
+        # sim/lidar modes: bridge Gazebo frame → laser_link
+        nodes.append(static_tf_node)
 
     # always
     nodes.append(filter_node)
@@ -165,14 +182,9 @@ def generate_launch_description():
         DeclareLaunchArgument('input_source', default_value='rosbag',
             description="'rosbag' | 'simulation' | 'lidar'"),
 
-        # --- cloud_topic — set based on source ---
-        DeclareLaunchArgument('cloud_topic',
-            default_value=PythonExpression([
-                "'/cx/lslidar_point_cloud' if '",
-                LaunchConfiguration('input_source'),
-                "' == 'rosbag' else '/lidar/points'"
-            ]),
-            description='Input PointCloud2 topic (auto-set per input_source)'),
+        # --- cloud_topic — auto-set per input_source ---
+        DeclareLaunchArgument('cloud_topic', default_value='__auto__',
+            description='Input PointCloud2 topic (auto: rosbag→/cx/..., sim→/lidar/...)'),
 
         # --- rosbag args ---
         DeclareLaunchArgument('bag_dir',
