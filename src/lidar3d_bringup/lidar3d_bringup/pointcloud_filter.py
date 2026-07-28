@@ -15,6 +15,7 @@ or launch args without recompiling).
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy  # 2026-07-29: QoS for Gazebo bridge
 from sensor_msgs.msg import PointCloud2
 
 
@@ -43,7 +44,7 @@ class PointCloudFilter(Node):
             PointCloud2,
             'input_cloud',  # remappable topic name
             self._callback,
-            10,
+            QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT),  # 2026-07-29: compat with Gazebo bridge
         )
         self.pub = self.create_publisher(
             PointCloud2,

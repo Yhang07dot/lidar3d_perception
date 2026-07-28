@@ -1,36 +1,50 @@
 # lidar3d_ws — 3D LiDAR 感知与聚类工作区
 
-这是一个基于 ROS 2 Humble 的 3D LiDAR 感知工程，当前目标是把 rosbag 数据流跑通，并在 RViz 中直观观察点云处理效果。项目已经具备一个较完整的“感知 demo”雏形：从 rosbag 重播、TF 发布、点云过滤，到 Patchwork++ 地面分割、聚类和检测框可视化，都已经串起来了。
+基于 ROS 2 Humble 的 3D LiDAR 感知 pipeline，支持 **rosbag 回放**、**Gazebo 仿真**、**实车 LiDAR** 三种数据源模式。pipeline 覆盖：TF 发布 → 点云过滤 → Patchwork++ 地面分割 → 欧几里得聚类 → 包围盒生成 → 障碍物分类与位姿变换。
 
-## 项目现状
+## 三种启动模式
 
-项目现在已经具备了以下能力：
+### rosbag 回放（默认）
+```bash
+ros2 launch lidar3d_bringup play_and_viz.launch.py
+```
 
-- 支持从 rosbag 回放 3D LiDAR 点云
-- 发布 TF：从 odom 到 base_link，并提供传感器静态外参
-- 对点云做距离和高度过滤，减少无效观测
-- 接入 Patchwork++ 做地面/非地面分割
-- 将非地面点云送入聚类节点，生成障碍物簇
-- 通过 RViz 展示原始点云与处理后点云的对比效果
+### Gazebo 仿真（配合 BajaSimPart）
+```bash
+ros2 launch lidar3d_bringup play_and_viz.launch.py input_source:=simulation
+```
 
-从工程角度看，这已经不是一个“空壳项目”了，而是一个能用来做算法调试、数据验证和视觉展示的工作区。
-
-## 主要包
-
-- [src/lidar3d_bringup](src/lidar3d_bringup)：负责启动流程、TF 发布、点云过滤、聚类结果可视化。
-- [src/lidar_cluster_ros2](src/lidar_cluster_ros2)：提供点云聚类相关实现，当前 launch 里使用的是其中的 Euclidean 聚类节点。
-- [src/patchwork-plusplus](src/patchwork-plusplus)：Patchwork++ 地面分割算法实现。
+### 实车 LiDAR
+```bash
+ros2 launch lidar3d_bringup play_and_viz.launch.py input_source:=lidar
+```
 
 ## 数据流
 
 ```text
-rosbag / PointCloud2
-  → 点云过滤（距离 + 高度）
-  → Patchwork++ 地面分割
-  → 非地面点云聚类
-  → 检测框 / Marker 可视化
-  → RViz 展示
+[rosbag|Gazebo|LiDAR] → /lidar/points 或 /cx/lslidar_point_cloud
+  → pointcloud_filter（距离+高度过滤）
+  → Patchwork++（地面/非地面分割）
+  → euclidean_grid（欧几里得聚类）
+  → cluster_bbox（3D 包围盒）
+  → obstacle_adapter（障碍物分类 + TF 变换 → /obstacle_markers）
+  → RViz 双窗口可视化
 ```
+
+## 主要包
+
+| 包 | 说明 |
+|----|------|
+| `lidar3d_bringup` | 启动流程、TF 发布、点云过滤、bbox 生成、障碍物适配 |
+| `lidar_cluster_ros2` | 点云聚类（Euclidean / DBSCAN / DBlane） |
+| `patchwork-plusplus` | Patchwork++ 地面分割算法 |
+
+## 第三方代码来源
+
+| 目录 | 来源 | 分支/版本 | 改动 |
+|------|------|-----------|------|
+| `src/patchwork-plusplus` | https://github.com/url-kaist/patchwork-plusplus | v1.4.1 (`3e6903a`) | 无 |
+| `src/lidar_cluster_ros2` | https://github.com/jkk-research/lidar_cluster_ros2 | ros2 (`17076fd`) | `euclidean_grid_core.hpp` 参数调整 |
 
 ## 依赖与环境
 

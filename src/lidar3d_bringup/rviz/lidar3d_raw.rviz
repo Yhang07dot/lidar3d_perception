@@ -30,7 +30,7 @@ Visualization Manager:
       Selectable: true
     - Class: rviz_default_plugins/Odometry
       Name: Chcnav Odometry
-      Enabled: true
+      Enabled: false  <!-- 2026-07-29: disabled for sim mode (no /chcnav/odom topic) -->
       Topic:
         Depth: 5
         Durability Policy: Volatile

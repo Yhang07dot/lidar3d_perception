@@ -2,14 +2,21 @@
 """
 Obstacle adapter: classify + transform + republish for planning/control.
 
-Subscribes to /obstacles/boxes (CUBE MarkerArray in laser_link from cluster_bbox).
+Subscribes to /obstacles/boxes (CUBE MarkerArray from cluster_bbox).
 Classifies each obstacle by 3D shape, transforms to base_link via TF,
 and publishes to /obstacle_markers (format expected by baja_cloud_sim planner).
+
+Parameters:
+  source_frame  — frame of incoming markers (default: 'laser_link')
+  target_frame  — frame to transform markers into (default: 'base_link')
 
 Classifications:
   0 = generic obstacle
   1 = pole      (tall, thin; height / width > 2.0)
   2 = bump      (low, flat; height < 0.25m)
+
+Changelog:
+  2026-07-29: source_frame/target_frame made configurable for sim mode.
 """
 
 import math
@@ -49,7 +56,13 @@ class ObstacleAdapter(Node):
     def __init__(self):
         super().__init__('obstacle_adapter')
 
-        # TF for laser_link → base_link transform
+        # 2026-07-29: source/target frame now configurable for sim vs rosbag modes
+        self.declare_parameter('source_frame', 'laser_link')
+        self.declare_parameter('target_frame', 'base_link')
+        self.source_frame = self.get_parameter('source_frame').value
+        self.target_frame = self.get_parameter('target_frame').value
+
+        # TF for source_frame → target_frame transform
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
@@ -72,16 +85,17 @@ class ObstacleAdapter(Node):
         self._log_interval = 10
 
         self.get_logger().info(
-            'Obstacle Adapter ready — /obstacles/boxes → /obstacle_markers'
+            f'Obstacle Adapter ready — /obstacles/boxes → /obstacle_markers '
+            f'(TF: {self.source_frame} → {self.target_frame})'
         )
 
     def callback(self, msg: MarkerArray):
         self._frame_count += 1
 
-        # Look up laser_link → base_link transform
+        # Look up source_frame → target_frame transform (2026-07-29: configurable)
         try:
             t: TransformStamped = self.tf_buffer.lookup_transform(
-                'base_link', 'laser_link', rclpy.time.Time()
+                self.target_frame, self.source_frame, rclpy.time.Time()
             )
         except Exception as e:
             self.get_logger().warn(f'TF lookup failed: {e}', throttle_duration_sec=5.0)

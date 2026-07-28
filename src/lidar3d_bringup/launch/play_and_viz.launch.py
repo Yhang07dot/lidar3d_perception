@@ -35,6 +35,9 @@ def launch_setup(context, *args, **kwargs):
     else:
         cloud_topic = raw_topic
 
+    # 2026-07-29: sim_time only for rosbag and simulation; real lidar uses wall clock
+    use_sim_time_val = src in ('rosbag', 'simulation')
+
     # Use_ ROS bag params (only in rosbag mode)
     bag_dir = LaunchConfiguration('bag_dir').perform(context)
     rate = LaunchConfiguration('rate').perform(context)
@@ -51,7 +54,7 @@ def launch_setup(context, *args, **kwargs):
     rviz_proc = os.path.join(pkg_share, 'rviz', 'lidar3d_processed.rviz')
 
     # --- filter params ---
-    filter_params = {'use_sim_time': True}
+    filter_params = {'use_sim_time': use_sim_time_val}
     overrides = {
         'max_range': LaunchConfiguration('max_range').perform(context),
         'min_range': LaunchConfiguration('min_range').perform(context),
@@ -78,24 +81,31 @@ def launch_setup(context, *args, **kwargs):
     tf_node = Node(
         package='lidar3d_bringup', executable='tf_publisher',
         name='tf_publisher', output='screen',
-        parameters=[{'use_sim_time': True}],
+        parameters=[{'use_sim_time': use_sim_time_val}],
     )
 
-    # --- static TF bridges (sim/lidar modes) ---
-    # Gazebo sensor frame → pipeline frame
-    lidar_tf_node = Node(
-        package='tf2_ros', executable='static_transform_publisher',
-        name='lidar_frame_bridge',
-        arguments=['0', '0', '0', '0', '0', '0',
-                   'baja_vehicle/base_link/lidar', 'laser_link'],
-        parameters=[{'use_sim_time': True}],
+    # --- TF bridges (sim/lidar modes) ---
+    # 2026-07-29: dynamic TF node for sensor frame (publishes to /tf, not /tf_static).
+    # rviz2 requires /tf (not /tf_static) for point cloud rendering with mixed
+    # dynamic+static TF chains.
+    sensor_tf_node = Node(
+        package='lidar3d_bringup', executable='tf_bridge',
+        name='sensor_tf_bridge', output='screen',
+        parameters=[{
+            'use_sim_time': use_sim_time_val,
+            'parent_frame': 'base_link',
+            'child_frame': 'baja_vehicle/base_link/lidar',
+            'x': 0.5, 'y': 0.0, 'z': 1.5,
+            'rate': 10.0,
+        }],
     )
-    # odom → map (rviz2 Fixed Frame = odom, simulation uses map)
+    # odom → map (rviz2 Fixed Frame = odom, simulation uses map).
+    # Static TF is fine here — not directly involved in point cloud rendering.
     odom_tf_node = Node(
         package='tf2_ros', executable='static_transform_publisher',
         name='odom_map_bridge',
         arguments=['0', '0', '0', '0', '0', '0', 'odom', 'map'],
-        parameters=[{'use_sim_time': True}],
+        parameters=[{'use_sim_time': use_sim_time_val}],
     )
 
     # --- filter (remap input_cloud → cloud_topic) ---
@@ -114,8 +124,9 @@ def launch_setup(context, *args, **kwargs):
         name='patchworkpp_node', output='screen',
         remappings=[('pointcloud_topic', '/cx/lslidar_point_cloud_filtered')],
         parameters=[{
-            'use_sim_time': True,
-            'base_frame': 'laser_link',
+            'use_sim_time': use_sim_time_val,
+            # 2026-07-29: sim mode uses Gazebo frame directly; rosbag keeps laser_link
+            'base_frame': 'laser_link' if is_rosbag else 'baja_vehicle/base_link/lidar',
             'sensor_height': float(sensor_height),
             'max_range': 50.0, 'min_range': 1.0, 'verbose': False,
         }],
@@ -127,7 +138,7 @@ def launch_setup(context, *args, **kwargs):
         package='lidar_cluster', executable='euclidean_grid',
         name='euclidean_grid', output='screen',
         parameters=[{
-            'use_sim_time': True,
+            'use_sim_time': use_sim_time_val,
             'points_in_topic': '/patchworkpp/nonground',
             'points_out_topic': '/clusters/points',
             'marker_out_topic': '/clusters/markers',
@@ -142,7 +153,7 @@ def launch_setup(context, *args, **kwargs):
     bbox_node = Node(
         package='lidar3d_bringup', executable='cluster_bbox',
         name='cluster_bbox', output='screen',
-        parameters=[{'use_sim_time': True}],
+        parameters=[{'use_sim_time': use_sim_time_val}],
         condition=seg_enabled,
     )
 
@@ -150,7 +161,11 @@ def launch_setup(context, *args, **kwargs):
     adapter_node = Node(
         package='lidar3d_bringup', executable='obstacle_adapter',
         name='obstacle_adapter', output='screen',
-        parameters=[{'use_sim_time': True}],
+        parameters=[{
+            'use_sim_time': use_sim_time_val,
+            # 2026-07-29: sim mode uses Gazebo sensor frame directly
+            'source_frame': 'laser_link' if is_rosbag else 'baja_vehicle/base_link/lidar',
+        }],
         condition=seg_enabled,
     )
 
@@ -158,12 +173,12 @@ def launch_setup(context, *args, **kwargs):
     rviz_raw_node = Node(
         package='rviz2', executable='rviz2', name='rviz2_raw',
         arguments=['-d', rviz_raw],
-        parameters=[{'use_sim_time': True}], output='screen',
+        parameters=[{'use_sim_time': use_sim_time_val}], output='screen',
     )
     rviz_proc_node = Node(
         package='rviz2', executable='rviz2', name='rviz2_proc',
         arguments=['-d', rviz_proc],
-        parameters=[{'use_sim_time': True}], output='screen',
+        parameters=[{'use_sim_time': use_sim_time_val}], output='screen',
     )
 
     # --- assembly ---
@@ -174,8 +189,8 @@ def launch_setup(context, *args, **kwargs):
         nodes.append(rosbag_node)
         nodes.append(tf_node)
     else:
-        # sim/lidar modes: bridge frames
-        nodes.extend([lidar_tf_node, odom_tf_node])
+        # sim/lidar modes: bridge frames (2026-07-29: dynamic sensor TF + static odom→map)
+        nodes.extend([sensor_tf_node, odom_tf_node])
 
     # always
     nodes.append(filter_node)

@@ -186,3 +186,74 @@ rosbag 模式:
 3. **简化测试** — 不要一上来就跑完整 pipeline，先确认 filter 输出不为空，再加 Patchwork++
 4. **clock 问题** — 检查是否有多份 `/clock` publisher（Gazebo + rosbag 同时发）。仿真模式应确保只有 Gazebo 发 `/clock`
 5. **BajaSimPart 加 .gitignore** — 排除 build/install/log/results
+
+---
+
+## 8. Session 2026-07-29: 修复仿真数据链路
+
+### 8.1 诊断结论
+
+经过对两个 workspace 的全面探索，确认：
+
+- **BajaSimPart 源文件干净**：`lidar_perception` 分支仅修改了 2 个源文件（model.sdf +28行, bridge.yaml +6行），`simulation.launch.py`、`params.yaml`、`baja_vehicle.urdf`、`simulation.rviz` 均未改动。仿真卡顿大概率来自 gpu_lidar 的 GPU 负载。
+- **lidar3d_ws 是问题所在**：TF 链断裂、`use_sim_time` 硬编码、QoS 不兼容。
+
+### 8.2 根因分析
+
+| 问题 | 根因 |
+|------|------|
+| **rviz2 空白/闪烁** | TF 链断裂：`baja_vehicle/base_link/lidar` 帧没有父帧（缺少 `base_link → baja_vehicle/base_link/lidar`），且之前使用的 `static_transform_publisher` 发布到 `/tf_static`，无法用于点云渲染 |
+| **时间倒流** | `use_sim_time=True` 全局硬编码 + 可能存在多源 `/clock`（Gazebo + 残留 rosbag play 进程） |
+| **Filter 未订阅** | 可能是 QoS 不匹配（Gazebo bridge 用 BEST_EFFORT，filter 默认 RELIABLE） |
+| **obstacle_adapter TF 查询失败** | 查找 `base_link → laser_link`，但仿真模式只发布 `baja_vehicle/base_link/lidar → laser_link` |
+
+### 8.3 修改清单
+
+| 文件 | 改动 | 说明 |
+|------|------|------|
+| `lidar3d_bringup/tf_bridge.py` | **新建** | 动态 TF 广播节点，10Hz 发 `/tf`（非 `/tf_static`），参数化 parent/child/xyz |
+| `setup.py` | +1 行 | 注册 `tf_bridge` 入口点 |
+| `launch/play_and_viz.launch.py` | ~20 行改 | (1) 静态TF→动态tf_bridge节点 (2) Patchwork++ base_frame 条件化 (3) adapter source_frame 条件化 (4) use_sim_time 条件化 |
+| `obstacle_adapter.py` | ~15 行改 | source_frame/target_frame 参数化（默认 laser_link/base_link，仿真模式改为 baja_vehicle/base_link/lidar） |
+| `pointcloud_filter.py` | ~3 行改 | 订阅改用 BEST_EFFORT QoS，兼容 Gazebo bridge |
+| `rviz/lidar3d_raw.rviz` | 1 行改 | 禁用 Chcnav Odometry display（仿真模式无此 topic） |
+
+**BajaSimPart 未修改。**
+
+### 8.4 修复后的 TF 树（仿真模式）
+
+```
+TruthPerceptionNode:  map → base_link                           (dynamic, 20Hz, /tf)
+tf_bridge (NEW):      base_link → baja_vehicle/base_link/lidar  (dynamic, 10Hz, /tf, x=0.5,0,1.5)
+static:               odom → map                               (identity, /tf_static)
+
+Pipeline 帧使用:
+  - rosbag 模式: 一切在 laser_link 帧（不变）
+  - 仿真模式:   Patchwork++/adapter 直接使用 baja_vehicle/base_link/lidar
+```
+
+### 8.5 仿真模式帧名策略
+
+仿真模式下去掉了 `laser_link` 中间帧：
+- Patchwork++ `base_frame` = `baja_vehicle/base_link/lidar`（条件化）
+- obstacle_adapter `source_frame` = `baja_vehicle/base_link/lidar`（条件化）
+- rosbag 模式保持 `laser_link`，向后兼容
+
+### 8.6 验证步骤
+
+```bash
+# 1. TF 链完整性
+ros2 run tf2_tools view_frames
+
+# 2. 动态 TF 验证
+ros2 run tf2_ros tf2_echo base_link baja_vehicle/base_link/lidar
+
+# 3. Filter 数据流
+ros2 topic hz /cx/lslidar_point_cloud_filtered
+
+# 4. 完整 pipeline
+ros2 topic echo /obstacle_markers
+
+# 5. rosbag 模式回归测试
+ros2 launch lidar3d_bringup play_and_viz.launch.py
+```

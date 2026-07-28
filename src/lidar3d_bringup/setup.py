@@ -30,6 +30,7 @@ setup(
     entry_points={
         'console_scripts': [
             'tf_publisher = lidar3d_bringup.tf_publisher:main',
+            'tf_bridge = lidar3d_bringup.tf_bridge:main',        # 2026-07-29: sim mode dynamic TF
             'pointcloud_filter = lidar3d_bringup.pointcloud_filter:main',
             'cluster_bbox = lidar3d_bringup.cluster_bbox:main',
             'obstacle_adapter = lidar3d_bringup.obstacle_adapter:main',
