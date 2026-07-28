@@ -81,12 +81,20 @@ def launch_setup(context, *args, **kwargs):
         parameters=[{'use_sim_time': True}],
     )
 
-    # --- static TF: Gazebo frame → laser_link (sim/lidar modes) ---
-    static_tf_node = Node(
+    # --- static TF bridges (sim/lidar modes) ---
+    # Gazebo sensor frame → pipeline frame
+    lidar_tf_node = Node(
         package='tf2_ros', executable='static_transform_publisher',
         name='lidar_frame_bridge',
         arguments=['0', '0', '0', '0', '0', '0',
                    'baja_vehicle/base_link/lidar', 'laser_link'],
+        parameters=[{'use_sim_time': True}],
+    )
+    # odom → map (rviz2 Fixed Frame = odom, simulation uses map)
+    odom_tf_node = Node(
+        package='tf2_ros', executable='static_transform_publisher',
+        name='odom_map_bridge',
+        arguments=['0', '0', '0', '0', '0', '0', 'odom', 'map'],
         parameters=[{'use_sim_time': True}],
     )
 
@@ -166,8 +174,8 @@ def launch_setup(context, *args, **kwargs):
         nodes.append(rosbag_node)
         nodes.append(tf_node)
     else:
-        # sim/lidar modes: bridge Gazebo frame → laser_link
-        nodes.append(static_tf_node)
+        # sim/lidar modes: bridge frames
+        nodes.extend([lidar_tf_node, odom_tf_node])
 
     # always
     nodes.append(filter_node)
