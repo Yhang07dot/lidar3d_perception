@@ -247,7 +247,7 @@ class RoadAnalyzer(Node):
             PointCloud2, '/patchworkpp/ground', self._callback, qos,
         )
         self.pub_boundaries = self.create_publisher(
-            MarkerArray, '/road_boundary_markers', 10,
+            MarkerArray, '/lidar/road_boundary_markers', 10,  # separate from truth /road_boundary_markers
         )
         self.pub_centerline = self.create_publisher(
             PathMsg, '/lidar/centerline', latched,  # visualisation only (truth provides /reference_centerline)
