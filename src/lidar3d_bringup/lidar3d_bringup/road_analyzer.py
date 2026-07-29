@@ -4,11 +4,12 @@ Road analyser — extracts boundaries and centreline from ground point cloud.
 
 Subscribes to /patchworkpp/ground, publishes:
   /road_boundary_markers  — LINE_STRIP ×2 (left/right road edges, base_link frame)
-  /reference_centerline    — Path (road midline, base_link frame)
+  /lidar/centerline        — Path (road midline, base_link frame, visualisation only)
 
 Algorithm: polar binning → gap detection → boundary points → centreline.
+TF lookup transforms boundary points from sensor frame → base_link.
 
-Added 2026-07-29: LiDAR-based road perception replacing truth_perception data.
+Added 2026-07-29: LiDAR-based road perception.
 """
 
 import math
@@ -18,6 +19,8 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from sensor_msgs.msg import PointCloud2
 from visualization_msgs.msg import Marker, MarkerArray
+from tf2_ros import Buffer, TransformListener
+from tf2_ros.transformations import quaternion_multiply, quaternion_from_euler
 from nav_msgs.msg import Path as PathMsg
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import ColorRGBA
@@ -197,6 +200,28 @@ def _compute_centerline(left: np.ndarray, right: np.ndarray, frame_id: str, now)
     return msg
 
 
+def _transform_points(pts: np.ndarray, transform) -> np.ndarray:
+    """Apply TF transform (translation + quaternion rotation) to (N,2) XY points."""
+    if len(pts) == 0:
+        return pts
+    tr = transform.transform.translation
+    q = transform.transform.rotation
+    qw, qx, qy, qz = q.w, q.x, q.y, q.z
+
+    # rotate points by quaternion (only XY rotation matters for 2D boundary)
+    out = np.zeros_like(pts)
+    for i, (px, py) in enumerate(pts):
+        # quaternion rotate (px, py, 0)
+        cx = 2.0 * (qy * 0.0 - qz * py)
+        cy = 2.0 * (qz * px - qx * 0.0)
+        cz = 2.0 * (qx * py - qy * px)
+        rx = px + qw * cx + (qy * cz - qz * cy)
+        ry = py + qw * cy + (qz * cx - qx * cz)
+        out[i, 0] = rx + tr.x
+        out[i, 1] = ry + tr.y
+    return out
+
+
 class RoadAnalyzer(Node):
     """Extract road boundaries and centreline from ground point cloud."""
 
@@ -214,6 +239,10 @@ class RoadAnalyzer(Node):
         latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
+        # TF for sensor_frame → base_link transform
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+
         self.sub = self.create_subscription(
             PointCloud2, '/patchworkpp/ground', self._callback, qos,
         )
@@ -221,13 +250,13 @@ class RoadAnalyzer(Node):
             MarkerArray, '/road_boundary_markers', 10,
         )
         self.pub_centerline = self.create_publisher(
-            PathMsg, '/reference_centerline', latched,
+            PathMsg, '/lidar/centerline', latched,  # visualisation only (truth provides /reference_centerline)
         )
 
         self._frame_count = 0
         self._last_centerline = None
 
-        self.get_logger().info('Road Analyzer ready — polar gap boundary + centreline')
+        self.get_logger().info('Road Analyzer ready — TF to base_link + polar gap boundary')
 
     def _callback(self, msg: PointCloud2):
         self._frame_count += 1
@@ -249,17 +278,28 @@ class RoadAnalyzer(Node):
         left_sm = _smooth_boundary(left, win)
         right_sm = _smooth_boundary(right, win)
 
-        now = self.get_clock().now().to_msg()
-        frame_id = msg.header.frame_id
+        # --- TF: transform boundary points sensor_frame → base_link ---
+        source_frame = msg.header.frame_id
+        try:
+            t = self.tf_buffer.lookup_transform('base_link', source_frame, rclpy.time.Time())
+        except Exception as e:
+            self.get_logger().warn(f'TF lookup {source_frame}→base_link failed: {e}', throttle_duration_sec=3.0)
+            return
 
-        # --- publish boundaries ---
+        left_bl = _transform_points(left_sm, t)
+        right_bl = _transform_points(right_sm, t)
+
+        now = self.get_clock().now().to_msg()
+        pub_frame = 'base_link'
+
+        # --- publish boundaries (base_link frame) ---
         markers = MarkerArray()
-        markers.markers.append(_boundary_to_linestrip(left_sm, frame_id, 'road_left', 0, now))
-        markers.markers.append(_boundary_to_linestrip(right_sm, frame_id, 'road_right', 1, now))
+        markers.markers.append(_boundary_to_linestrip(left_bl, pub_frame, 'road_left', 0, now))
+        markers.markers.append(_boundary_to_linestrip(right_bl, pub_frame, 'road_right', 1, now))
         self.pub_boundaries.publish(markers)
 
-        # --- publish centreline (latched, only when enough data) ---
-        centerline = _compute_centerline(left_sm, right_sm, frame_id, now)
+        # --- publish centreline (visualisation only, base_link frame) ---
+        centerline = _compute_centerline(left_bl, right_bl, pub_frame, now)
         if len(centerline.poses) >= 3:
             self._last_centerline = centerline
             self.pub_centerline.publish(centerline)
