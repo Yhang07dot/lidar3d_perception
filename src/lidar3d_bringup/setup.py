@@ -34,6 +34,8 @@ setup(
             'pointcloud_filter = lidar3d_bringup.pointcloud_filter:main',
             'cluster_bbox = lidar3d_bringup.cluster_bbox:main',
             'obstacle_adapter = lidar3d_bringup.obstacle_adapter:main',
+            'euclidean_cluster_3d = lidar3d_bringup.euclidean_cluster_3d:main',  # 2026-07-29: 3D pipeline
+            'cluster_analyzer = lidar3d_bringup.cluster_analyzer:main',           # 2026-07-29: 3D pipeline
         ],
     },
 )

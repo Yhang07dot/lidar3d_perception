@@ -59,17 +59,19 @@ class ObstacleAdapter(Node):
         # 2026-07-29: source/target frame now configurable for sim vs rosbag modes
         self.declare_parameter('source_frame', 'laser_link')
         self.declare_parameter('target_frame', 'base_link')
+        self.declare_parameter('input_topic', '/obstacles/boxes')  # 2026-07-29: switch 2D/3D pipeline
         self.source_frame = self.get_parameter('source_frame').value
         self.target_frame = self.get_parameter('target_frame').value
+        self.input_topic = self.get_parameter('input_topic').value
 
         # TF for source_frame → target_frame transform
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        # Subscribe to our obstacle boxes
+        # Subscribe to our obstacle boxes (topic switchable via input_topic param)
         self.sub = self.create_subscription(
             MarkerArray,
-            '/obstacles/boxes',
+            self.input_topic,
             self.callback,
             10,
         )
