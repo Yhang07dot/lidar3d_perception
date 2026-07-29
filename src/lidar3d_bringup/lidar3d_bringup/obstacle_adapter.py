@@ -27,6 +27,10 @@ from geometry_msgs.msg import TransformStamped
 from tf2_ros import Buffer, TransformListener
 
 
+# 2026-07-29: shared type labels with cluster_analyzer
+TYPE_LABELS = {0: 'obstacle', 1: 'pole', 2: 'bump', 3: 'slope'}
+
+
 def classify_obstacle(scale):
     """
     Classify obstacle by bounding box shape.
@@ -110,7 +114,13 @@ class ObstacleAdapter(Node):
             if marker.action != Marker.ADD:
                 continue
 
-            label, type_id = classify_obstacle(marker.scale)
+            # 2026-07-29: preserve 3D pipeline classification when ns is a known type
+            KNOWN_3D_TYPES = {'slope', 'obstacle', 'pole', 'bump'}
+            if marker.ns in KNOWN_3D_TYPES:
+                label = marker.ns
+                type_id = {v: k for k, v in TYPE_LABELS.items()}.get(label, 0)
+            else:
+                label, type_id = classify_obstacle(marker.scale)
 
             # Transform position from laser_link → base_link
             # T_base_laser = (tx, ty, tz, qx, qy, qz, qw)
@@ -148,9 +158,15 @@ class ObstacleAdapter(Node):
             m.pose.position.z = base_z
             m.pose.orientation.w = 1.0
             m.scale = marker.scale
-            m.color.r = 1.0 if type_id == 1 else 0.0    # red for poles
-            m.color.g = 0.0 if type_id == 1 else 1.0    # green for others
-            m.color.b = 0.0
+            # 2026-07-29: per-type colours matching cluster_analyzer
+            if type_id == 3:    # slope → deep green
+                m.color.r, m.color.g, m.color.b = 0.0, 0.5, 0.0
+            elif type_id == 2:  # bump → yellow
+                m.color.r, m.color.g, m.color.b = 1.0, 1.0, 0.0
+            elif type_id == 1:  # pole → red
+                m.color.r, m.color.g, m.color.b = 1.0, 0.0, 0.0
+            else:               # obstacle → orange
+                m.color.r, m.color.g, m.color.b = 1.0, 0.5, 0.0
             m.color.a = 0.6
             m.lifetime.nanosec = 200_000_000  # 200ms
             out.markers.append(m)
