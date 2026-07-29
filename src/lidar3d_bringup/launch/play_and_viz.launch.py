@@ -39,6 +39,7 @@ def launch_setup(context, *args, **kwargs):
     use_sim_time_val = src in ('rosbag', 'simulation')
     # 2026-07-29: 3D clustering pipeline (parallel to 2D, for slope-obstacle discrimination)
     use_3d = LaunchConfiguration('use_3d_clustering').perform(context).lower() == 'true'
+    use_lidar_percep = LaunchConfiguration('use_lidar_perception').perform(context).lower() == 'true'
     # rviz window toggles
     show_raw = LaunchConfiguration('use_rviz_raw').perform(context).lower() == 'true'
     show_proc = LaunchConfiguration('use_rviz_proc').perform(context).lower() == 'true'
@@ -194,6 +195,16 @@ def launch_setup(context, *args, **kwargs):
         condition=seg_and_3d,
     )
 
+    # --- LiDAR perception replacing truth data (controlled by use_lidar_perception) ---
+    lidar_percep_cond = IfCondition(LaunchConfiguration('use_lidar_perception'))
+
+    road_node = Node(
+        package='lidar3d_bringup', executable='road_analyzer',
+        name='road_analyzer', output='screen',
+        parameters=[{'use_sim_time': use_sim_time_val}],
+        condition=lidar_percep_cond,
+    )
+
     # --- rviz2 ---
     rviz_raw_node = Node(
         package='rviz2', executable='rviz2', name='rviz2_raw',
@@ -230,6 +241,8 @@ def launch_setup(context, *args, **kwargs):
     nodes.extend([patch_node, cluster_node, bbox_node, adapter_node])
     # 2026-07-29: 3D clustering pipeline (parallel, conditional)
     nodes.extend([cluster_3d_node, analyzer_node])
+    # 2026-07-29: LiDAR perception replacing truth data
+    nodes.append(road_node)
     nodes.extend([rviz_raw_node, rviz_proc_node, rviz_3d_node])
 
     return nodes
@@ -273,6 +286,8 @@ def generate_launch_description():
         # 2026-07-29: 3D clustering pipeline for slope-obstacle discrimination
         DeclareLaunchArgument('use_3d_clustering', default_value='false',
             description='Enable 3D Euclidean clustering + PCA analysis (parallel to 2D)'),
+        DeclareLaunchArgument('use_lidar_perception', default_value='false',
+            description='Replace truth_perception data with LiDAR-based road boundaries+obstacles'),
         DeclareLaunchArgument('use_rviz_raw', default_value='true',
             description='Show raw filtered point cloud rviz2 window'),
         DeclareLaunchArgument('use_rviz_proc', default_value='true',
