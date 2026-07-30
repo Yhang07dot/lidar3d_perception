@@ -40,6 +40,7 @@ def launch_setup(context, *args, **kwargs):
     # 2026-07-29: 3D clustering pipeline (parallel to 2D, for slope-obstacle discrimination)
     use_3d = LaunchConfiguration('use_3d_clustering').perform(context).lower() == 'true'
     use_lidar_percep = LaunchConfiguration('use_lidar_perception').perform(context).lower() == 'true'
+    use_voxel = LaunchConfiguration('use_voxel_analyzer').perform(context).lower() == 'true'
     # rviz window toggles
     show_raw = LaunchConfiguration('use_rviz_raw').perform(context).lower() == 'true'
     show_proc = LaunchConfiguration('use_rviz_proc').perform(context).lower() == 'true'
@@ -175,7 +176,7 @@ def launch_setup(context, *args, **kwargs):
             'source_frame': 'laser_link' if is_rosbag else 'baja_vehicle/base_link/lidar',
             # 2026-07-29: switch to 3D pipeline output when use_3d_clustering:=true
             'input_topic': '/obstacles/boxes_3d_voxel' if use_voxel else ('/obstacles/boxes_3d' if use_3d else '/obstacles/boxes'),
-            'passthrough': use_3d,  # 2026-07-29: 3D pipeline provides ns classification
+            'passthrough': use_3d or use_voxel,  # 3D or voxel pipeline provides ns classification
         }],
         condition=seg_enabled,
     )
@@ -200,7 +201,6 @@ def launch_setup(context, *args, **kwargs):
     lidar_percep_cond = IfCondition(LaunchConfiguration('use_lidar_perception'))
 
     # --- 2026-07-30: voxel-based analyser (parallel to cluster_analyzer) ---
-    use_voxel = LaunchConfiguration('use_voxel_analyzer').perform(context).lower() == 'true'
     voxel_cond = IfCondition(LaunchConfiguration('use_voxel_analyzer'))
 
     voxel_node = Node(
