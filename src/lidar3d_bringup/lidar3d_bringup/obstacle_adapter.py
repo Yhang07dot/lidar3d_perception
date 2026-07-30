@@ -60,9 +60,11 @@ class ObstacleAdapter(Node):
         self.declare_parameter('source_frame', 'laser_link')
         self.declare_parameter('target_frame', 'base_link')
         self.declare_parameter('input_topic', '/obstacles/boxes')  # 2026-07-29: switch 2D/3D pipeline
+        self.declare_parameter('passthrough', False)               # 2026-07-29: preserve 3D pipeline classification
         self.source_frame = self.get_parameter('source_frame').value
         self.target_frame = self.get_parameter('target_frame').value
         self.input_topic = self.get_parameter('input_topic').value
+        self.passthrough = self.get_parameter('passthrough').value
 
         # TF for source_frame → target_frame transform
         self.tf_buffer = Buffer()
@@ -110,7 +112,13 @@ class ObstacleAdapter(Node):
             if marker.action != Marker.ADD:
                 continue
 
-            label, type_id = classify_obstacle(marker.scale)
+            # 2026-07-29: passthrough mode preserves 3D pipeline classification
+            if self.passthrough:
+                TYPE_MAP = {'slope': 3, 'bump': 2, 'pole': 1, 'obstacle': 0}
+                label = marker.ns
+                type_id = TYPE_MAP.get(label, 0)
+            else:
+                label, type_id = classify_obstacle(marker.scale)
 
             # Transform position from laser_link → base_link
             # T_base_laser = (tx, ty, tz, qx, qy, qz, qw)

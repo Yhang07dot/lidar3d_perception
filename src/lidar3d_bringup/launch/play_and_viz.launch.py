@@ -175,6 +175,7 @@ def launch_setup(context, *args, **kwargs):
             'source_frame': 'laser_link' if is_rosbag else 'baja_vehicle/base_link/lidar',
             # 2026-07-29: switch to 3D pipeline output when use_3d_clustering:=true
             'input_topic': '/obstacles/boxes_3d' if use_3d else '/obstacles/boxes',
+            'passthrough': use_3d,  # 2026-07-29: 3D pipeline provides ns classification
         }],
         condition=seg_enabled,
     )

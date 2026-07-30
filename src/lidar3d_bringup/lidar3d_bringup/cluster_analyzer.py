@@ -173,6 +173,47 @@ def _classify(features: dict, dims: np.ndarray, n_points: int):
     return TYPE_OBSTACLE, f'obs_H{H:.1f}m'
 
 
+def _confidence_score(features, n_points, track_type_hist) -> float:
+    """Compute 0-1 confidence score for a classified cluster.
+
+    Factors: point count (0-0.3), PCA validity (0-0.2), planarity confidence (0-0.2),
+             temporal stability from tracking history (0-0.3).
+    """
+    score = 0.0
+
+    # point count (sigmoid-like: 5→0, 15→0.15, 30+→0.3)
+    if n_points >= 30:
+        score += 0.3
+    elif n_points >= 20:
+        score += 0.25
+    elif n_points >= 15:
+        score += 0.2
+    elif n_points >= 10:
+        score += 0.1
+    # < 10: no contribution
+
+    # PCA success
+    if features is not None:
+        score += 0.2
+
+        # planarity confidence: strong planar (P>0.8) or strongly scattered (P<0.3) = confident
+        P = features['planarity']
+        if P > 0.8 or P < 0.3:
+            score += 0.2
+        elif P > 0.6 or (0.3 <= P <= 0.5):
+            score += 0.1
+
+    # temporal stability from tracking history
+    if track_type_hist and len(track_type_hist) >= 3:
+        from collections import Counter
+        cnt = Counter(track_type_hist)
+        most_common_count = cnt.most_common(1)[0][1]
+        stability = most_common_count / len(track_type_hist)
+        score += 0.3 * stability
+
+    return min(1.0, score)
+
+
 class ClusterAnalyzer(Node):
     """PCA geometry analysis + classification with temporal tracking."""
 
@@ -185,6 +226,7 @@ class ClusterAnalyzer(Node):
         self.declare_parameter('tracking_distance_threshold', 2.0)  # m, max centroid shift to match
         self.declare_parameter('tracking_history_size', 10)         # frames of history for mode voting
         self.declare_parameter('tracking_max_lost', 3)              # frames before removing stale track
+        self.declare_parameter('confidence_threshold', 0.5)         # below → low-confidence debug topic
         self.declare_parameter('log_interval', 10)                  # frames between summary logs
 
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -197,6 +239,9 @@ class ClusterAnalyzer(Node):
         )
         self.pub_centers = self.create_publisher(
             MarkerArray, '/obstacles/centers_3d', 10,
+        )
+        self.pub_low_conf = self.create_publisher(
+            MarkerArray, '/lidar/low_confidence_boxes', 10,
         )
 
         self._frame_count = 0
@@ -340,24 +385,36 @@ class ClusterAnalyzer(Node):
         raw_labels = [c[5] for c in cluster_info]
         tracked = self._match_tracks(centroids_arr, raw_types, raw_labels)
 
-        # --- third pass: publish markers with stabilized labels ---
-        boxes = MarkerArray()
-        centers = MarkerArray()
+        # --- third pass: confidence scoring + stratified publish ---
+        conf_thr = self.get_parameter('confidence_threshold').value
+        boxes_high = MarkerArray()
+        centers_high = MarkerArray()
+        boxes_low = MarkerArray()
         log_lines = []
 
         for i, (pts, cid, centroid, dims, raw_type, raw_label, features) in enumerate(cluster_info):
             stab_type, stab_label = tracked[i]
+            n_pts = len(pts)
+
+            # get track history for confidence scoring
+            track_hist = []
+            for tid, t in self._tracks.items():
+                if t.get('_matched') and np.linalg.norm(np.array(t['centroid']) - centroid) < 0.1:
+                    track_hist = list(t['type_hist'])
+                    break
+
+            conf = _confidence_score(features, n_pts, track_hist)
+            high_conf = conf >= conf_thr
 
             if self._frame_count % log_int == 0 and features:
                 log_lines.append(
-                    f'[{TYPE_LABELS[stab_type]}] cid={cid} '
-                    f'P={features["planarity"]:.2f} L={features["linearity"]:.2f} '
-                    f'slope={features["slope_angle_deg"]:.1f}deg '
-                    f'H={dims[2]:.2f}m W={max(dims[0],dims[1]):.2f}m N={len(pts)} '
-                    f'→ {stab_label}'
+                    f'[{TYPE_LABELS[stab_type]}] cid={cid} conf={conf:.2f} '
+                    f'P={features["planarity"]:.2f} slope={features["slope_angle_deg"]:.1f}deg '
+                    f'H={dims[2]:.2f}m N={n_pts} → {stab_label}'
                 )
 
             color = TYPE_COLORS.get(stab_type, TYPE_COLORS[0])
+            lbl = f'{stab_label} c{conf:.1f}'
             lifetime_ns = 300_000_000
 
             box = Marker()
@@ -375,8 +432,10 @@ class ClusterAnalyzer(Node):
             box.scale.y = float(dims[1])
             box.scale.z = float(dims[2])
             box.color = color
+            if not high_conf:
+                box.color.a = 0.25
             box.lifetime.nanosec = lifetime_ns
-            boxes.markers.append(box)
+            (boxes_high if high_conf else boxes_low).markers.append(box)
 
             center = Marker()
             center.header.frame_id = frame_id
@@ -392,12 +451,16 @@ class ClusterAnalyzer(Node):
             center.scale.y = 0.25
             center.scale.z = 0.25
             center.color = color
+            if not high_conf:
+                center.color.a = 0.25
             center.lifetime.nanosec = lifetime_ns
-            center.text = stab_label
-            centers.markers.append(center)
+            center.text = lbl
+            (centers_high if high_conf else boxes_low).markers.append(center)
 
-        self.pub_boxes.publish(boxes)
-        self.pub_centers.publish(centers)
+        self.pub_boxes.publish(boxes_high)
+        self.pub_centers.publish(centers_high)
+        if boxes_low.markers:
+            self.pub_low_conf.publish(boxes_low)
 
         if log_lines and self._frame_count % log_int == 0:
             self.get_logger().info(f'Frame {self._frame_count}: ' + ' | '.join(log_lines))
