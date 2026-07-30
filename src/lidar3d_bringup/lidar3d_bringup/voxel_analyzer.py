@@ -1,25 +1,33 @@
 #!/usr/bin/env python3
 """
-Voxel-based obstacle analyser — replaces PCA-on-raw-clusters with grid-level geometric features.
+Voxel-based obstacle analyser — boundary-first, multi-feature, pothole detection.
 
-Subscribes to /patchworkpp/nonground, publishes:
-  /obstacles/boxes_3d_voxel   — CUBE MarkerArray (high-confidence, 4-class)
-  /lidar/low_confidence_voxel  — CUBE MarkerArray (low-confidence, debug only)
+Subscribes:
+  /patchworkpp/nonground   (PointCloud2, for obstacle analysis)
+  /patchworkpp/ground      (PointCloud2, for pothole detection)
 
-Algorithm:
-  1. multi-resolution 3D voxel grid (0-15m:0.1m, 15-30m:0.2m, 30-50m:0.4m)
-  2. per-voxel outlier removal (top 5% floating points)
-  3. per-voxel geometric features (z_range, z_variance, density)
-  4. 26-neighbour voxel flood-fill → objects
-  5. per-object aggregated features → rule classification
-  6. temporal tracking + confidence scoring
+Publishes:
+  /obstacles/boxes_3d_voxel    — high-confidence classified CUBE markers
+  /lidar/low_confidence_voxel   — low-confidence debug markers
+  /lidar/pothole_markers        — negative obstacle debug markers (purple SPHERES)
 
-Tuning guide:
-  voxel_size_{near,mid,far}: smaller=sharper boundaries, larger=more stable stats
-  outlier_pct: higher=more aggressive noise removal
-  min_total_points: lower=detect smaller objects (but more false positives)
+Architecture:
+  1. Voxel-level features: z_range, roughness, step_height, ring_gradient, edge flag
+  2. Boundary detection: z_range > edge_z_range → edge voxel
+  3. 26-neighbour voxel flood-fill → objects
+  4. Object-level PCA: slope, verticality, linearity, curvature, relative_elevation
+  5. Multi-feature rule classification (7 rules + size sanity)
+  6. Pothole: local Z anomaly in ground point cloud (2D grid, 4-neighbour)
+  7. Temporal tracking + confidence scoring
 
-Added 2026-07-30: voxel-based geometric analysis replacing PCA-on-clusters.
+ring recovery: computed from vertical angle (atan2(z, hypot(x,y))).
+  ⚠ Gazebo bridge loses the native ring field. Real VLP-16 drivers include it natively.
+  On real hardware, replace _compute_ring() with points['ring'] for zero-cost access.
+
+Tuning: ros2 param set /voxel_analyzer <param> <value>
+  Key thresholds: edge_z_range (default 0.15m), pothole_depth_m (0.08m)
+
+Added 2026-07-30.
 """
 
 import math
@@ -31,20 +39,23 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import PointCloud2
 from visualization_msgs.msg import Marker, MarkerArray
-from std_msgs.msg import ColorRGBA
+from std_msgs.msg import ColorRGBA, Header
 
-# --- constants (shared with cluster_analyzer) ---
 DTYPE_MAP = {
     1: np.int8, 2: np.uint8, 3: np.int16, 4: np.uint16,
     5: np.int32, 6: np.uint32, 7: np.float32, 8: np.float64,
 }
-TYPE_OBSTACLE, TYPE_POLE, TYPE_BUMP, TYPE_SLOPE = 0, 1, 2, 3
-TYPE_LABELS = {0: 'obstacle', 1: 'pole', 2: 'bump', 3: 'slope'}
+
+# --- type constants ---
+TYPE_OBSTACLE, TYPE_POLE, TYPE_BUMP, TYPE_SLOPE, TYPE_ROUGH, TYPE_POTHOLE = 0, 1, 2, 3, 4, 5
+TYPE_LABELS = {0: 'obstacle', 1: 'pole', 2: 'bump', 3: 'slope', 4: 'rough', 5: 'pothole'}
 TYPE_COLORS = {
-    0: ColorRGBA(r=1.0, g=0.5, b=0.0, a=0.6),
-    1: ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.7),
-    2: ColorRGBA(r=1.0, g=1.0, b=0.0, a=0.5),
-    3: ColorRGBA(r=0.0, g=0.5, b=0.0, a=0.45),
+    0: ColorRGBA(r=1.0, g=0.5, b=0.0, a=0.6),   # orange — obstacle
+    1: ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.7),   # red — pole
+    2: ColorRGBA(r=1.0, g=1.0, b=0.0, a=0.5),   # yellow — bump
+    3: ColorRGBA(r=0.0, g=0.5, b=0.0, a=0.45),  # deep green — slope
+    4: ColorRGBA(r=1.0, g=0.8, b=0.0, a=0.5),   # amber — rough terrain
+    5: ColorRGBA(r=0.5, g=0.0, b=1.0, a=0.6),   # purple — pothole
 }
 
 
@@ -58,478 +69,428 @@ def _pc2_to_xyz(msg: PointCloud2) -> np.ndarray:
     return np.column_stack([points['x'], points['y'], points['z']])
 
 
-# ---------------------------------------------------------------------------
-# voxel grid building
-# ---------------------------------------------------------------------------
+# ⚠ Gazebo bridge drops native ring field. Compute from vertical angle as fallback.
+# Real VLP-16 driver includes ring natively — use points['ring'] when available.
+def _compute_ring(xyz: np.ndarray) -> np.ndarray:
+    v_deg = np.degrees(np.arctan2(xyz[:, 2], np.sqrt(xyz[:, 0]**2 + xyz[:, 1]**2)))
+    return np.clip(((v_deg + 15.0) / 2.0).astype(np.int32), 0, 15)
+
+
+# ======================================================================
+# Multi-resolution voxel grid
+# ======================================================================
 
 def _build_multires_grid(xyz: np.ndarray) -> dict:
-    """Build multi-resolution 3D voxel grid.
-
-    Returns dict: {(ix, iy, iz): {'pts': [indices], 'voxel_size': float}}
-    Zones: near(0-15m,0.1m), mid(15-30m,0.2m), far(30-50m,0.4m).
-    """
     dist = np.sqrt(xyz[:, 0]**2 + xyz[:, 1]**2 + xyz[:, 2]**2)
     grid = {}
-
-    zones = [
-        (0.0, 15.0, 0.10),
-        (15.0, 30.0, 0.20),
-        (30.0, 50.0, 0.40),
-    ]
-
-    for z_min, z_max, vs in zones:
+    for z_min, z_max, vs in [(0.0, 15.0, 0.10), (15.0, 30.0, 0.20), (30.0, 50.0, 0.40)]:
         mask = (dist >= z_min) & (dist < z_max)
         if not mask.any():
             continue
-        pts_zone = xyz[mask]
-        indices_zone = np.where(mask)[0]
-        voxel_indices = np.floor(pts_zone / vs).astype(np.int32)
-
-        for vi in range(len(pts_zone)):
-            key = (voxel_indices[vi, 0], voxel_indices[vi, 1], voxel_indices[vi, 2])
+        pts = xyz[mask]
+        indices = np.where(mask)[0]
+        vx = np.floor(pts / vs).astype(np.int32)
+        for vi in range(len(pts)):
+            key = (vx[vi, 0], vx[vi, 1], vx[vi, 2])
             if key not in grid:
                 grid[key] = {'pts': [], 'voxel_size': vs}
-            grid[key]['pts'].append(indices_zone[vi])
-
+            grid[key]['pts'].append(indices[vi])
     return grid
 
-
-# ---------------------------------------------------------------------------
-# per-voxel outlier removal
-# ---------------------------------------------------------------------------
 
 def _remove_outliers(grid: dict, xyz: np.ndarray, pct: float = 0.05) -> dict:
-    """Remove top `pct` highest-Z points from each voxel (floating noise).
-
-    Returns filtered grid dict (same structure, reduced point lists).
-    """
-    for key, cell in grid.items():
-        indices = cell['pts']
-        if len(indices) < 5:
-            continue  # too few points to filter meaningfully
-        z_vals = xyz[indices, 2]
-        cutoff = np.percentile(z_vals, 100 * (1.0 - pct))
-        cell['pts'] = [i for i, z in zip(indices, z_vals) if z <= cutoff]
+    for cell in grid.values():
+        idx = cell['pts']
+        if len(idx) < 5:
+            continue
+        z = xyz[idx, 2]
+        cutoff = np.percentile(z, 100 * (1.0 - pct))
+        cell['pts'] = [i for i, zv in zip(idx, z) if zv <= cutoff]
     return grid
 
 
-# ---------------------------------------------------------------------------
-# per-voxel feature extraction
-# ---------------------------------------------------------------------------
+# ======================================================================
+# Voxel-level features
+# ======================================================================
 
-def _voxel_features(grid: dict, xyz: np.ndarray) -> dict:
-    """Compute per-voxel geometric features.
-
-    Returns dict with same keys, adding: centroid, z_range, z_variance, n_pts, density.
-    Removes voxels with < min_pts (default 3).
-    """
+def _voxel_features(grid: dict, xyz: np.ndarray, min_pts: int = 3) -> dict:
+    r"""Compute z_range, roughness, density per voxel.  edge flag = z_range > 0.15m."""
     result = {}
     for key, cell in grid.items():
-        indices = cell['pts']
-        if len(indices) < 3:
+        idx = cell['pts']
+        if len(idx) < min_pts:
             continue
-        pts = xyz[indices]
-        cell['centroid'] = pts.mean(axis=0)
-        cell['z_range'] = float(pts[:, 2].max() - pts[:, 2].min())
-        cell['z_variance'] = float(pts[:, 2].var()) if len(indices) > 1 else 0.0
-        cell['n_pts'] = len(indices)
-        cell['density'] = len(indices) / (cell['voxel_size'] ** 3)
+        pts = xyz[idx]
+        c = pts.mean(axis=0)
+        zr = float(pts[:, 2].max() - pts[:, 2].min())
+        cell['centroid'] = c
+        cell['z_range'] = zr
+        cell['roughness'] = float(np.mean((pts[:, 2] - c[2])**2))
+        cell['n_pts'] = len(idx)
+        cell['density'] = len(idx) / (cell['voxel_size']**3)
+        cell['edge'] = zr > 0.15
         result[key] = cell
     return result
 
 
-# ---------------------------------------------------------------------------
-# voxel clustering (26-neighbour flood fill)
-# ---------------------------------------------------------------------------
+def _step_heights(features: dict) -> dict:
+    """Max |Z diff| with 6 face-neighbours.  step > 0.1m → marks edge."""
+    occ = set(features)
+    offs = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
+    for key, c in features.items():
+        mx = 0.0
+        for d in offs:
+            n = (key[0] + d[0], key[1] + d[1], key[2] + d[2])
+            if n in occ:
+                mx = max(mx, abs(c['centroid'][2] - features[n]['centroid'][2]))
+        c['step_height'] = mx
+        if mx > 0.1:
+            c['edge'] = True
+    return features
+
+
+def _ring_gradient(features: dict, xyz: np.ndarray) -> dict:
+    """Max |Z diff| between adjacent rings within same voxel (Gazebo fallback ring)."""
+    rings = _compute_ring(xyz)
+    for key, cell in features.items():
+        idx = cell['pts']
+        if len(idx) < 2:
+            cell['ring_gradient'] = 0.0
+            continue
+        r, z = rings[idx], xyz[idx, 2]
+        mg = 0.0
+        for i in range(len(idx)):
+            for j in range(i + 1, len(idx)):
+                if abs(int(r[i]) - int(r[j])) == 1:
+                    mg = max(mg, abs(float(z[i]) - float(z[j])))
+        cell['ring_gradient'] = mg
+    return features
+
+
+# ======================================================================
+# Voxel clustering
+# ======================================================================
 
 def _cluster_voxels(features: dict) -> list:
-    """Flood-fill connected occupied voxels → list of object dicts.
-
-    Each object dict: {voxel_keys, all_point_indices, centroid, bbox, total_n}.
-    """
-    # build occupancy set
-    occupied = set(features.keys())
+    occ = set(features)
     visited = set()
     objects = []
+    offs = np.array([[dx, dy, dz] for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
+                     if not (dx == 0 and dy == 0 and dz == 0)], dtype=np.int32)
 
-    offsets = np.array([
-        [dx, dy, dz]
-        for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
-        if not (dx == 0 and dy == 0 and dz == 0)
-    ], dtype=np.int32)
-
-    for seed in occupied:
+    for seed in occ:
         if seed in visited:
             continue
         visited.add(seed)
-        frontier = [seed]
-        obj_voxels = [seed]
-
-        while frontier:
-            current = frontier.pop()
-            for off in offsets:
-                nbr = (current[0] + off[0], current[1] + off[1], current[2] + off[2])
-                if nbr in occupied and nbr not in visited:
-                    visited.add(nbr)
-                    frontier.append(nbr)
-                    obj_voxels.append(nbr)
-
-        # aggregate
-        all_pts = []
-        centroids = []
-        for vk in obj_voxels:
-            cell = features[vk]
-            all_pts.extend(cell['pts'])
-            centroids.append(cell['centroid'])
-
-        centroids_arr = np.array(centroids)
-        objects.append({
-            'voxel_keys': obj_voxels,
-            'all_point_indices': all_pts,
-            'total_n': len(all_pts),
-            'n_voxels': len(obj_voxels),
-            'centroids': centroids_arr,
-            'mean_centroid': centroids_arr.mean(axis=0),
-        })
-
+        q, vx = [seed], [seed]
+        while q:
+            cur = q.pop()
+            for o in offs:
+                nb = (cur[0] + o[0], cur[1] + o[1], cur[2] + o[2])
+                if nb in occ and nb not in visited:
+                    visited.add(nb)
+                    q.append(nb)
+                    vx.append(nb)
+        pts = []
+        cents = []
+        for v in vx:
+            pts.extend(features[v]['pts'])
+            cents.append(features[v]['centroid'])
+        objects.append({'voxel_keys': vx, 'all_point_indices': pts,
+                        'total_n': len(pts), 'n_voxels': len(vx),
+                        'centroids': np.array(cents), 'mean_centroid': np.array(cents).mean(axis=0)})
     return objects
 
 
-# ---------------------------------------------------------------------------
-# object-level feature aggregation + classification
-# ---------------------------------------------------------------------------
+# ======================================================================
+# Object-level PCA
+# ======================================================================
 
-def _object_features(obj: dict, features: dict, xyz: np.ndarray) -> dict:
-    """Compute aggregated features for one object."""
-    z_ranges = [features[vk]['z_range'] for vk in obj['voxel_keys']]
-    z_vars = [features[vk]['z_variance'] for vk in obj['voxel_keys']]
-
-    indices = obj['all_point_indices']
-    pts = xyz[indices]
-
-    min_pt = pts.min(axis=0)
-    max_pt = pts.max(axis=0)
-    dims = max_pt - min_pt
-
+def _object_pca(pts: np.ndarray) -> dict:
+    n = len(pts)
+    if n < 5:
+        return {'slope_deg': 0, 'verticality': 0, 'linearity': 0, 'curvature': 0}
+    c = pts - pts.mean(axis=0)
+    try:
+        _, S, Vt = np.linalg.svd(c, full_matrices=False)
+    except np.linalg.LinAlgError:
+        return {'slope_deg': 0, 'verticality': 0, 'linearity': 0, 'curvature': 0}
+    lam = S**2
+    s = lam.sum()
+    if s < 1e-12:
+        return {'slope_deg': 0, 'verticality': 0, 'linearity': 0, 'curvature': 0}
+    l0 = lam[0] / s
+    l1 = lam[1] / s if len(lam) >= 2 else 0
+    l2 = lam[2] / s if len(lam) >= 3 else 0
+    nz = max(-1.0, min(1.0, float(Vt[-1][2])))
+    if nz < 0:
+        nz = -nz
     return {
-        'dims': dims,
-        'centroid': (min_pt + max_pt) / 2.0,
-        'total_n': obj['total_n'],
-        'n_voxels': obj['n_voxels'],
-        'mean_z_range': float(np.mean(z_ranges)),
-        'mean_z_variance': float(np.mean(z_vars)),
-        'occupancy': obj['n_voxels'] / max(1, np.prod(np.ceil(dims / 0.15))),
-        'z_gradient': float(dims[2] / max(0.01, np.sqrt(dims[0]**2 + dims[1]**2))),
-        'aspect_ratio': float(dims[2] / max(0.05, min(dims[0], dims[1]))),
+        'slope_deg': float(math.degrees(math.acos(nz))),
+        'verticality': 1.0 - nz,
+        'linearity': (l0 - l1) / l0 if l0 > 1e-12 else 0.0,
+        'curvature': l2,
     }
 
 
-def _classify_voxel(of: dict) -> tuple:
-    """Rule-based classification from voxel-aggregated features.
+# ======================================================================
+# Object features + classification
+# ======================================================================
 
-    Returns (type_id, label).
-    Tune thresholds via cluster_analyzer-like params.
-    """
-    R = of['mean_z_variance']       # roughness: higher = more scattered
-    G = of['z_gradient']            # slope estimate
-    H = float(of['dims'][2])        # height
-    W = float(max(of['dims'][0], of['dims'][1]))
-    W_min = float(min(of['dims'][0], of['dims'][1]))
-    N = of['total_n']
-    occ = of['occupancy']
+def _object_features(obj: dict, feat: dict, xyz: np.ndarray, ground_z: float = None) -> dict:
+    zr = [feat[k]['z_range'] for k in obj['voxel_keys']]
+    sh = [feat[k]['step_height'] for k in obj['voxel_keys']]
+    ro = [feat[k]['roughness'] for k in obj['voxel_keys']]
+    ed = [feat[k]['edge'] for k in obj['voxel_keys']]
+    rg = [feat[k]['ring_gradient'] for k in obj['voxel_keys']]
 
-    # sparse noise (low occupancy, scattered)
-    if occ < 0.05 and N < 20:
-        return TYPE_OBSTACLE, 'noise'
+    pts = xyz[obj['all_point_indices']]
+    mn, mx = pts.min(axis=0), pts.max(axis=0)
+    dims = mx - mn
+    pca = _object_pca(pts)
 
-    # slope: smooth (low R), moderate gradient, substantial size
-    if R < 0.04 and 0.01 < G < 0.5 and H < 3.0 and N > 20:
-        direction = 'uphill' if of['dims'][2] > 0 else 'slope'
-        return TYPE_SLOPE, f'slope_G{G:.2f}_H{H:.1f}m'
+    rel = 0.0
+    if ground_z is not None:
+        rel = float(mn[2] - ground_z)
 
-    # bump: very low height, smooth
-    if H < 0.3 and R < 0.06:
-        return TYPE_BUMP, f'bump_H{H:.2f}m'
+    return {
+        'dims': dims, 'centroid': (mn + mx) / 2.0,
+        'total_n': obj['total_n'], 'n_voxels': obj['n_voxels'],
+        'mean_z_range': float(np.mean(zr)),
+        'mean_step_height': float(np.mean(sh)),
+        'mean_roughness': float(np.mean(ro)),
+        'edge_ratio': float(np.mean(ed)),
+        'max_ring_gradient': float(max(rg)) if rg else 0.0,
+        **pca,
+        'relative_elevation': rel,
+        'aspect': float(dims[2] / max(0.05, min(dims[0], dims[1]))),
+        'max_dim': float(dims.max()),
+        'width': float(max(dims[0], dims[1])),
+        'width_min': float(min(dims[0], dims[1])),
+    }
 
-    # pole: tall, thin, moderate roughness (vertical surfaces)
-    aspect = H / max(0.05, W_min)
-    if aspect > 2.5 and H > 0.3:
+
+def _classify(of: dict) -> tuple:
+    H = float(of['dims'][2])
+
+    # size sanity: very large objects are terrain, not obstacles
+    if of['max_dim'] > 8.0 or (of['width'] > 6.0 and of['slope_deg'] < 20):
+        return TYPE_SLOPE, f'slope_big_H{H:.1f}m'
+
+    # pole: vertical, tall, thin
+    if of['verticality'] > 0.85 and H > 0.3 and of['width_min'] < 0.5:
         return TYPE_POLE, f'pole_H{H:.1f}m'
 
-    # obstacle: anything else
+    # elevated above ground → obstacle
+    if of['relative_elevation'] > 0.15 and of['total_n'] > 10:
+        return TYPE_OBSTACLE, f'obs_elev{of["relative_elevation"]:.2f}m'
+
+    # sharp boundary + enough height → obstacle
+    if of['edge_ratio'] > 0.3 and H > 0.25:
+        return TYPE_OBSTACLE, f'obs_edge{of["edge_ratio"]:.1f}_H{H:.1f}m'
+
+    # bump: low height + sharp ring gradient or high curvature
+    if H < 0.3 and (of['max_ring_gradient'] > 0.05 or of['curvature'] > 0.02):
+        return TYPE_BUMP, f'bump_H{H:.2f}m'
+
+    # slope: gentle, smooth, low edge ratio
+    if of['slope_deg'] < 15.0 and of['mean_step_height'] < 0.08 and of['edge_ratio'] < 0.2:
+        return TYPE_SLOPE, f'slope_{of["slope_deg"]:.0f}deg'
+
+    # rough terrain: bumpy but not steep
+    if of['mean_roughness'] > 0.01 and of['slope_deg'] < 10.0:
+        return TYPE_ROUGH, f'rough_R{of["mean_roughness"]:.3f}'
+
     return TYPE_OBSTACLE, f'obs_H{H:.1f}m'
 
 
-# ---------------------------------------------------------------------------
-# confidence scoring (reused from cluster_analyzer pattern)
-# ---------------------------------------------------------------------------
+# ======================================================================
+# Pothole detection (ground post-processing)
+# ======================================================================
 
-def _confidence_score_voxel(of: dict, track_type_hist) -> float:
-    """0-1 confidence from voxel features + temporal stability."""
-    score = 0.0
+def _detect_potholes(ground_xyz: np.ndarray, grid_res: float = 0.2,
+                     depth_thr: float = 0.08, min_pts: int = 3) -> list:
+    if len(ground_xyz) < 20:
+        return []
+    x, y, z = ground_xyz[:, 0], ground_xyz[:, 1], ground_xyz[:, 2]
+    ix = np.floor(x / grid_res).astype(np.int32)
+    iy = np.floor(y / grid_res).astype(np.int32)
+    cells = {}
+    for i in range(len(ground_xyz)):
+        k = (ix[i], iy[i])
+        cells.setdefault(k, []).append(z[i])
+    mean_z = {k: float(np.mean(zs)) for k, zs in cells.items() if len(zs) >= min_pts}
+    pots = []
+    for k, mz in mean_z.items():
+        dep = max((mean_z.get((k[0] + d[0], k[1] + d[1]), mz) - mz
+                   for d in [(1, 0), (-1, 0), (0, 1), (0, -1)]), default=0)
+        if dep > depth_thr:
+            pots.append((k[0] * grid_res + grid_res / 2, k[1] * grid_res + grid_res / 2, dep))
+    return pots
+
+
+# ======================================================================
+# Confidence
+# ======================================================================
+
+def _confidence(of: dict, track_hist) -> float:
+    s = 0.0
     N = of['total_n']
-    occ = of['occupancy']
-
-    if N >= 50:   score += 0.3
-    elif N >= 30: score += 0.25
-    elif N >= 20: score += 0.2
-    elif N >= 10: score += 0.1
-
-    if occ > 0.3:  score += 0.2
-    elif occ > 0.15: score += 0.1
-
-    R = of['mean_z_variance']
-    if R < 0.02 or R > 0.15:
-        score += 0.2
-    else:
-        score += 0.1
-
-    if track_type_hist and len(track_type_hist) >= 3:
-        cnt = Counter(track_type_hist)
-        stability = cnt.most_common(1)[0][1] / len(track_type_hist)
-        score += 0.3 * stability
-
-    return min(1.0, score)
+    if N >= 50:   s += 0.3
+    elif N >= 30: s += 0.25
+    elif N >= 20: s += 0.2
+    elif N >= 10: s += 0.1
+    s += 0.2 if (of['edge_ratio'] > 0.3 or of['edge_ratio'] < 0.05) else 0.1
+    s += 0.2 if (of['slope_deg'] < 5 or of['slope_deg'] > 20) else 0.0
+    if track_hist and len(track_hist) >= 3:
+        s += 0.3 * Counter(track_hist).most_common(1)[0][1] / len(track_hist)
+    return min(1.0, s)
 
 
-# ---------------------------------------------------------------------------
-# main node
-# ---------------------------------------------------------------------------
+# ======================================================================
+# Main node
+# ======================================================================
 
 class VoxelAnalyzer(Node):
-    """Voxel-based geometric obstacle analyser."""
-
     def __init__(self):
         super().__init__('voxel_analyzer')
 
-        self.declare_parameter('outlier_pct', 0.05)               # top % to remove per voxel
-        self.declare_parameter('min_total_points', 10)            # min pts per object
-        self.declare_parameter('min_dim', 0.10)
-        self.declare_parameter('max_dim', 15.0)
-        self.declare_parameter('confidence_threshold', 0.35)
-        self.declare_parameter('tracking_distance_threshold', 2.0)
-        self.declare_parameter('tracking_history_size', 10)
-        self.declare_parameter('tracking_max_lost', 3)
-        self.declare_parameter('log_interval', 10)
+        for p, v in [('outlier_pct', 0.05), ('min_total_points', 10), ('min_dim', 0.10),
+                      ('max_dim', 15.0), ('confidence_threshold', 0.35),
+                      ('tracking_distance_threshold', 2.0), ('tracking_history_size', 10),
+                      ('tracking_max_lost', 3), ('log_interval', 10), ('edge_z_range', 0.15),
+                      ('pothole_depth_m', 0.08)]:
+            self.declare_parameter(p, v)
 
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self.sub_ng = self.create_subscription(PointCloud2, '/patchworkpp/nonground', self._cb_ng, qos)
+        self.sub_g = self.create_subscription(PointCloud2, '/patchworkpp/ground', self._cb_g, qos)
+        self.pub_boxes = self.create_publisher(MarkerArray, '/obstacles/boxes_3d_voxel', 10)
+        self.pub_cents = self.create_publisher(MarkerArray, '/obstacles/centers_3d_voxel', 10)
+        self.pub_low = self.create_publisher(MarkerArray, '/lidar/low_confidence_voxel', 10)
+        self.pub_pot = self.create_publisher(MarkerArray, '/lidar/pothole_markers', 10)
 
-        self.sub = self.create_subscription(
-            PointCloud2, '/patchworkpp/nonground', self._callback, qos,
-        )
-        self.pub_boxes = self.create_publisher(
-            MarkerArray, '/obstacles/boxes_3d_voxel', 10,
-        )
-        self.pub_centers = self.create_publisher(
-            MarkerArray, '/obstacles/centers_3d_voxel', 10,
-        )
-        self.pub_low_conf = self.create_publisher(
-            MarkerArray, '/lidar/low_confidence_voxel', 10,
-        )
+        self._fc, self._tracks, self._tid, self._gz = 0, {}, 1, None
+        self.get_logger().info('Voxel Analyzer v2 — boundary-first + 7 features + pothole')
 
-        self._frame_count = 0
-        self._tracks = {}
-        self._next_track_id = 1
-
-        self.get_logger().info('Voxel Analyzer ready — multi-res grid + geometric features')
-
-    def _match_tracks(self, centroids, type_ids, labels):
-        """Greedy nearest-neighbour track matching (same as cluster_analyzer)."""
-        dist_thr = self.get_parameter('tracking_distance_threshold').value
-        hist_size = self.get_parameter('tracking_history_size').value
-        max_lost = self.get_parameter('tracking_max_lost').value
-
+    def _match_tracks(self, cents, tids, labels):
+        dthr = self.get_parameter('tracking_distance_threshold').value
+        hsz = self.get_parameter('tracking_history_size').value
+        mlost = self.get_parameter('tracking_max_lost').value
         for t in self._tracks.values():
-            t['_matched'] = False
-
-        assignments = {}
-        unassigned = list(range(len(centroids)))
-
+            t['_m'] = False
+        a, ua = {}, list(range(len(cents)))
         if self._tracks:
-            track_ids = list(self._tracks.keys())
-            track_cents = np.array([self._tracks[tid]['centroid'] for tid in track_ids])
-            for ci, c in enumerate(centroids):
-                dists = np.linalg.norm(track_cents - c, axis=1)
-                best_j = int(np.argmin(dists))
-                if dists[best_j] < dist_thr and not self._tracks[track_ids[best_j]]['_matched']:
-                    assignments[ci] = track_ids[best_j]
-                    self._tracks[track_ids[best_j]]['_matched'] = True
-                    unassigned.remove(ci)
+            tks = list(self._tracks)
+            tc = np.array([self._tracks[t]['centroid'] for t in tks])
+            for ci, c in enumerate(cents):
+                ds = np.linalg.norm(tc - c, axis=1)
+                bj = int(np.argmin(ds))
+                if ds[bj] < dthr and not self._tracks[tks[bj]]['_m']:
+                    a[ci] = tks[bj]; self._tracks[tks[bj]]['_m'] = True; ua.remove(ci)
+        for ci, tid in a.items():
+            t = self._tracks[tid]; t['centroid'] = cents[ci]; t['th'].append(tids[ci])
+            if len(t['th']) > hsz: t['th'].popleft()
+            t['label'] = labels[ci]; t['type_id'] = Counter(t['th']).most_common(1)[0][0]; t['lc'] = 0
+        for ci in ua:
+            tid = self._tid; self._tid += 1
+            self._tracks[tid] = {'centroid': cents[ci], 'th': deque([tids[ci]], maxlen=hsz),
+                                  'type_id': tids[ci], 'label': labels[ci], 'lc': 0, '_m': True}
+            a[ci] = tid
+        for tid in [t for t in self._tracks if not self._tracks[t]['_m']]:
+            self._tracks[tid]['lc'] += 1
+            if self._tracks[tid]['lc'] > mlost: del self._tracks[tid]
+        return {ci: (self._tracks[tid]['type_id'], self._tracks[tid]['label'])
+                if (tid := a.get(ci)) and tid in self._tracks else (tids[ci], labels[ci])
+                for ci in range(len(cents))}
 
-        for ci, tid in assignments.items():
-            t = self._tracks[tid]
-            t['centroid'] = centroids[ci]
-            t['type_hist'].append(type_ids[ci])
-            if len(t['type_hist']) > hist_size:
-                t['type_hist'].popleft()
-            t['label'] = labels[ci]
-            t['type_id'] = Counter(t['type_hist']).most_common(1)[0][0]
-            t['lost_count'] = 0
+    def _cb_g(self, msg: PointCloud2):
+        g = _pc2_to_xyz(msg)
+        if len(g) < 20: return
+        self._gz = float(g[:, 2].mean())
+        pots = _detect_potholes(g, depth_thr=self.get_parameter('pothole_depth_m').value)
+        if pots:
+            ma = MarkerArray(); now = self.get_clock().now().to_msg()
+            for i, (cx, cy, d) in enumerate(pots):
+                m = Marker(header=Header(frame_id=msg.header.frame_id, stamp=now),
+                           ns='pothole', id=i, type=Marker.SPHERE, action=Marker.ADD)
+                m.pose.position.x, m.pose.position.y, m.pose.position.z = cx, cy, -d / 2
+                m.scale.x = m.scale.y = m.scale.z = 0.3; m.color = TYPE_COLORS[TYPE_POTHOLE]
+                m.lifetime.nanosec = 500_000_000; m.text = f'pothole_{d*100:.0f}cm'
+                ma.markers.append(m)
+            self.pub_pot.publish(ma)
 
-        for ci in unassigned:
-            tid = self._next_track_id
-            self._next_track_id += 1
-            hist = deque([type_ids[ci]], maxlen=hist_size)
-            self._tracks[tid] = {
-                'centroid': centroids[ci], 'type_hist': hist,
-                'type_id': type_ids[ci], 'label': labels[ci],
-                'lost_count': 0, '_matched': True,
-            }
-            assignments[ci] = tid
+    def _cb_ng(self, msg: PointCloud2):
+        self._fc += 1; xyz = _pc2_to_xyz(msg)
+        if len(xyz) < 20: return
 
-        stale = [tid for tid, t in self._tracks.items() if not t['_matched']]
-        for tid in stale:
-            self._tracks[tid]['lost_count'] += 1
-            if self._tracks[tid]['lost_count'] > max_lost:
-                del self._tracks[tid]
+        grid = _remove_outliers(_build_multires_grid(xyz), xyz, self.get_parameter('outlier_pct').value)
+        feat = _voxel_features(grid, xyz)
+        if not feat: return
+        feat = _step_heights(feat)
+        feat = _ring_gradient(feat, xyz)
 
-        result = {}
-        for ci in range(len(centroids)):
-            tid = assignments.get(ci)
-            if tid is not None and tid in self._tracks:
-                result[ci] = (self._tracks[tid]['type_id'], self._tracks[tid]['label'])
-            else:
-                result[ci] = (type_ids[ci], labels[ci])
-        return result
+        objs = _cluster_voxels(feat)
+        now = self.get_clock().now().to_msg(); fid = msg.header.frame_id
+        oi = []
 
-    def _callback(self, msg: PointCloud2):
-        self._frame_count += 1
-        xyz = _pc2_to_xyz(msg)
-        if len(xyz) < 20:
-            return
+        for obj in objs:
+            if obj['total_n'] < self.get_parameter('min_total_points').value: continue
+            of = _object_features(obj, feat, xyz, self._gz)
+            if of['dims'].max() < self.get_parameter('min_dim').value: continue
+            if of['dims'].max() > self.get_parameter('max_dim').value: continue
+            t, l = _classify(of); oi.append((of, t, l))
 
-        pct = self.get_parameter('outlier_pct').value
-        min_pts = self.get_parameter('min_total_points').value
-        min_dim = self.get_parameter('min_dim').value
-        max_dim = self.get_parameter('max_dim').value
-        conf_thr = self.get_parameter('confidence_threshold').value
-        log_int = self.get_parameter('log_interval').value
+        if not oi: return
 
-        # Step 1-2: multi-res grid + outlier removal
-        grid = _build_multires_grid(xyz)
-        grid = _remove_outliers(grid, xyz, pct)
+        tracked = self._match_tracks(np.array([x[0]['centroid'] for x in oi]),
+                                      [x[1] for x in oi], [x[2] for x in oi])
+        cthr = self.get_parameter('confidence_threshold').value; li = self.get_parameter('log_interval').value
+        bh, ch, bl = MarkerArray(), MarkerArray(), MarkerArray(); ll = []
 
-        # Step 3: per-voxel features
-        features = _voxel_features(grid, xyz)
-        if not features:
-            return
+        for i, (of, _, _) in enumerate(oi):
+            st, sl = tracked[i]
+            th = []
+            for t in self._tracks.values():
+                if t.get('_m') and np.linalg.norm(np.array(t['centroid']) - of['centroid']) < 0.1:
+                    th = list(t['th']); break
+            c = _confidence(of, th); hi = c >= cthr
 
-        # Step 4: voxel clustering → objects
-        objects = _cluster_voxels(features)
+            if self._fc % li == 0:
+                ll.append(f'[{TYPE_LABELS[st]}] N={of["total_n"]} c={c:.2f} '
+                          f'E={of["edge_ratio"]:.2f} S={of["slope_deg"]:.1f}deg '
+                          f'V={of["verticality"]:.2f} H={of["dims"][2]:.2f}m → {sl}')
 
-        # Step 5: object features + classify
-        now = self.get_clock().now().to_msg()
-        frame_id = msg.header.frame_id
-        obj_info = []
+            col = TYPE_COLORS.get(st, TYPE_COLORS[0]); dm, ct = of['dims'], of['centroid']; lt = 300_000_000
 
-        for obj in objects:
-            if obj['total_n'] < min_pts:
-                continue
-            of = _object_features(obj, features, xyz)
-            dmax = of['dims'].max()
-            if dmax < min_dim or dmax > max_dim:
-                continue
-            type_id, label = _classify_voxel(of)
-            obj_info.append((of, type_id, label))
-
-        if not obj_info:
-            return
-
-        # Step 6: track + confidence + publish
-        centroids_arr = np.array([oi[0]['centroid'] for oi in obj_info])
-        raw_types = [oi[1] for oi in obj_info]
-        raw_labels = [oi[2] for oi in obj_info]
-        tracked = self._match_tracks(centroids_arr, raw_types, raw_labels)
-
-        boxes_high = MarkerArray()
-        centers_high = MarkerArray()
-        boxes_low = MarkerArray()
-        log_lines = []
-
-        for i, (of, raw_type, raw_label) in enumerate(obj_info):
-            stab_type, stab_label = tracked[i]
-
-            track_hist = []
-            for tid, t in self._tracks.items():
-                if t.get('_matched') and np.linalg.norm(np.array(t['centroid']) - of['centroid']) < 0.1:
-                    track_hist = list(t['type_hist'])
-                    break
-
-            conf = _confidence_score_voxel(of, track_hist)
-            high_conf = conf >= conf_thr
-
-            if self._frame_count % log_int == 0:
-                log_lines.append(
-                    f'[{TYPE_LABELS[stab_type]}] N={of["total_n"]} conf={conf:.2f} '
-                    f'R={of["mean_z_variance"]:.3f} G={of["z_gradient"]:.3f} '
-                    f'H={of["dims"][2]:.2f}m → {stab_label}'
-                )
-
-            color = TYPE_COLORS.get(stab_type, TYPE_COLORS[0])
-            lbl = f'{stab_label} c{conf:.1f}'
-            lifetime_ns = 300_000_000
-
-            dims = of['dims']
-            c = of['centroid']
-
-            box = Marker()
-            box.header.frame_id = frame_id
-            box.header.stamp = now
-            box.ns = TYPE_LABELS[stab_type]
-            box.id = i
-            box.type = Marker.CUBE
-            box.action = Marker.ADD
-            box.pose.position.x = float(c[0])
-            box.pose.position.y = float(c[1])
-            box.pose.position.z = float(c[2])
+            box = Marker(header=Header(frame_id=fid, stamp=now), ns=TYPE_LABELS[st], id=i,
+                         type=Marker.CUBE, action=Marker.ADD)
+            box.pose.position.x, box.pose.position.y, box.pose.position.z = float(ct[0]), float(ct[1]), float(ct[2])
             box.pose.orientation.w = 1.0
-            box.scale.x = float(dims[0])
-            box.scale.y = float(dims[1])
-            box.scale.z = float(dims[2])
-            box.color = color
-            if not high_conf:
-                box.color.a = 0.25
-            box.lifetime.nanosec = lifetime_ns
-            (boxes_high if high_conf else boxes_low).markers.append(box)
+            box.scale.x, box.scale.y, box.scale.z = float(dm[0]), float(dm[1]), float(dm[2])
+            box.color = col; box.lifetime.nanosec = lt
+            if not hi: box.color.a = 0.25
+            (bh if hi else bl).markers.append(box)
 
-            center = Marker()
-            center.header.frame_id = frame_id
-            center.header.stamp = now
-            center.ns = TYPE_LABELS[stab_type]
-            center.id = i
-            center.type = Marker.SPHERE
-            center.action = Marker.ADD
-            center.pose.position.x = float(c[0])
-            center.pose.position.y = float(c[1])
-            center.pose.position.z = float(c[2])
-            center.scale.x = 0.25
-            center.scale.y = 0.25
-            center.scale.z = 0.25
-            center.color = color
-            if not high_conf:
-                center.color.a = 0.25
-            center.lifetime.nanosec = lifetime_ns
-            center.text = lbl
-            centers_high.markers.append(center)
+            ctr = Marker(header=Header(frame_id=fid, stamp=now), ns=TYPE_LABELS[st], id=i,
+                         type=Marker.SPHERE, action=Marker.ADD)
+            ctr.pose.position.x, ctr.pose.position.y, ctr.pose.position.z = float(ct[0]), float(ct[1]), float(ct[2])
+            ctr.scale.x = ctr.scale.y = ctr.scale.z = 0.25; ctr.color = col
+            if not hi: ctr.color.a = 0.25
+            ctr.lifetime.nanosec = lt; ctr.text = f'{sl} c{c:.1f}'; ch.markers.append(ctr)
 
-        self.pub_boxes.publish(boxes_high)
-        self.pub_centers.publish(centers_high)
-        if boxes_low.markers:
-            self.pub_low_conf.publish(boxes_low)
-
-        if log_lines and self._frame_count % log_int == 0:
-            self.get_logger().info(f'Frame {self._frame_count}: ' + ' | '.join(log_lines))
+        self.pub_boxes.publish(bh); self.pub_cents.publish(ch)
+        if bl.markers: self.pub_low.publish(bl)
+        if ll and self._fc % li == 0:
+            self.get_logger().info(f'F{self._fc}: ' + ' | '.join(ll))
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = VoxelAnalyzer()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    node.destroy_node()
-    rclpy.shutdown()
+    try: rclpy.spin(node)
+    except KeyboardInterrupt: pass
+    node.destroy_node(); rclpy.shutdown()
 
 
 if __name__ == '__main__':
