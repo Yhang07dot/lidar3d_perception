@@ -38,13 +38,8 @@ def launch_setup(context, *args, **kwargs):
     # 2026-07-29: sim_time only for rosbag and simulation; real lidar uses wall clock
     use_sim_time_val = src in ('rosbag', 'simulation')
     # 2026-07-29: 3D clustering pipeline (parallel to 2D, for slope-obstacle discrimination)
-    use_3d = LaunchConfiguration('use_3d_clustering').perform(context).lower() == 'true'
     use_lidar_percep = LaunchConfiguration('use_lidar_perception').perform(context).lower() == 'true'
     use_voxel = LaunchConfiguration('use_voxel_analyzer').perform(context).lower() == 'true'
-    # rviz window toggles
-    show_raw = LaunchConfiguration('use_rviz_raw').perform(context).lower() == 'true'
-    show_proc = LaunchConfiguration('use_rviz_proc').perform(context).lower() == 'true'
-    show_3d = LaunchConfiguration('use_rviz_3d').perform(context).lower() == 'true'
 
     # Use_ ROS bag params (only in rosbag mode)
     bag_dir = LaunchConfiguration('bag_dir').perform(context)
@@ -60,7 +55,6 @@ def launch_setup(context, *args, **kwargs):
     pkg_share = get_package_share_directory('lidar3d_bringup')
     rviz_raw = os.path.join(pkg_share, 'rviz', 'lidar3d_raw.rviz')
     rviz_proc = os.path.join(pkg_share, 'rviz', 'lidar3d_processed.rviz')
-    rviz_3d = os.path.join(pkg_share, 'rviz', 'lidar3d_3d.rviz')
     rviz_voxel = os.path.join(pkg_share, 'rviz', 'lidar3d_voxel.rviz')
 
     # --- filter params ---
@@ -168,11 +162,9 @@ def launch_setup(context, *args, **kwargs):
     )
 
     # --- classify + transform → /obstacle_markers ---
-    # resolve input topic: voxel > 3D-pca > 2D
+    # resolve input topic: voxel > 2D
     if use_voxel:
         adapter_input = '/obstacles/boxes_3d_voxel'
-    elif use_3d:
-        adapter_input = '/obstacles/boxes_3d'
     else:
         adapter_input = '/obstacles/boxes'
 
@@ -183,25 +175,9 @@ def launch_setup(context, *args, **kwargs):
             'use_sim_time': use_sim_time_val,
             'source_frame': 'laser_link' if is_rosbag else 'baja_vehicle/base_link/lidar',
             'input_topic': adapter_input,
-            'passthrough': use_3d or use_voxel,
+            'passthrough': use_voxel,
         }],
         condition=seg_enabled,
-    )
-
-    # --- 3D clustering pipeline (parallel to 2D, controlled by use_3d_clustering) ---
-    seg_and_3d = IfCondition(LaunchConfiguration('use_3d_clustering'))
-
-    cluster_3d_node = Node(
-        package='lidar3d_bringup', executable='euclidean_cluster_3d',
-        name='euclidean_cluster_3d', output='screen',
-        parameters=[{'use_sim_time': use_sim_time_val}],
-        condition=seg_and_3d,
-    )
-    analyzer_node = Node(
-        package='lidar3d_bringup', executable='cluster_analyzer',
-        name='cluster_analyzer', output='screen',
-        parameters=[{'use_sim_time': use_sim_time_val}],
-        condition=seg_and_3d,
     )
 
     # --- LiDAR perception replacing truth data (controlled by use_lidar_perception) ---
@@ -237,12 +213,6 @@ def launch_setup(context, *args, **kwargs):
         parameters=[{'use_sim_time': use_sim_time_val}], output='screen',
         condition=IfCondition(LaunchConfiguration('use_rviz_proc')),
     )
-    rviz_3d_node = Node(
-        package='rviz2', executable='rviz2', name='rviz2_3d',
-        arguments=['-d', rviz_3d],
-        parameters=[{'use_sim_time': use_sim_time_val}], output='screen',
-        condition=IfCondition(LaunchConfiguration('use_rviz_3d')),
-    )
     rviz_voxel_node = Node(
         package='rviz2', executable='rviz2', name='rviz2_voxel',
         arguments=['-d', rviz_voxel],
@@ -264,13 +234,11 @@ def launch_setup(context, *args, **kwargs):
     # always
     nodes.append(filter_node)
     nodes.extend([patch_node, cluster_node, bbox_node, adapter_node])
-    # 2026-07-29: 3D clustering pipeline (parallel, conditional)
-    nodes.extend([cluster_3d_node, analyzer_node])
     # 2026-07-29: LiDAR perception replacing truth data
     nodes.append(road_node)
     # 2026-07-30: voxel analyser (parallel to cluster_analyzer)
     nodes.append(voxel_node)
-    nodes.extend([rviz_raw_node, rviz_proc_node, rviz_3d_node, rviz_voxel_node])
+    nodes.extend([rviz_raw_node, rviz_proc_node, rviz_voxel_node])
 
     return nodes
 
@@ -311,8 +279,6 @@ def generate_launch_description():
         DeclareLaunchArgument('enable_ground_seg', default_value='true',
             description='Enable ground segmentation + downstream'),
         # 2026-07-29: 3D clustering pipeline for slope-obstacle discrimination
-        DeclareLaunchArgument('use_3d_clustering', default_value='false',
-            description='Enable 3D Euclidean clustering + PCA analysis (parallel to 2D)'),
         DeclareLaunchArgument('use_lidar_perception', default_value='false',
             description='Replace truth_perception data with LiDAR-based road boundaries+obstacles'),
         DeclareLaunchArgument('use_voxel_analyzer', default_value='false',
@@ -321,8 +287,5 @@ def generate_launch_description():
             description='Show raw filtered point cloud rviz2 window'),
         DeclareLaunchArgument('use_rviz_proc', default_value='true',
             description='Show 2D pipeline processed rviz2 window'),
-        DeclareLaunchArgument('use_rviz_3d', default_value='false',
-            description='Show 3D classification rviz2 window'),
-
         OpaqueFunction(function=launch_setup),
     ])
