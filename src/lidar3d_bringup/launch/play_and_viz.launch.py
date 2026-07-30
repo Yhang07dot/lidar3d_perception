@@ -167,16 +167,22 @@ def launch_setup(context, *args, **kwargs):
     )
 
     # --- classify + transform → /obstacle_markers ---
+    # resolve input topic: voxel > 3D-pca > 2D
+    if use_voxel:
+        adapter_input = '/obstacles/boxes_3d_voxel'
+    elif use_3d:
+        adapter_input = '/obstacles/boxes_3d'
+    else:
+        adapter_input = '/obstacles/boxes'
+
     adapter_node = Node(
         package='lidar3d_bringup', executable='obstacle_adapter',
         name='obstacle_adapter', output='screen',
         parameters=[{
             'use_sim_time': use_sim_time_val,
-            # 2026-07-29: sim mode uses Gazebo sensor frame directly
             'source_frame': 'laser_link' if is_rosbag else 'baja_vehicle/base_link/lidar',
-            # 2026-07-29: switch to 3D pipeline output when use_3d_clustering:=true
-            'input_topic': '/obstacles/boxes_3d_voxel' if use_voxel else ('/obstacles/boxes_3d' if use_3d else '/obstacles/boxes'),
-            'passthrough': use_3d or use_voxel,  # 3D or voxel pipeline provides ns classification
+            'input_topic': adapter_input,
+            'passthrough': use_3d or use_voxel,
         }],
         condition=seg_enabled,
     )
