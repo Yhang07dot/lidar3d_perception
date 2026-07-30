@@ -49,14 +49,23 @@ DTYPE_MAP = {
 # --- type constants ---
 TYPE_OBSTACLE, TYPE_POLE, TYPE_BUMP, TYPE_SLOPE, TYPE_ROUGH, TYPE_POTHOLE = 0, 1, 2, 3, 4, 5
 TYPE_LABELS = {0: 'obstacle', 1: 'pole', 2: 'bump', 3: 'slope', 4: 'rough', 5: 'pothole'}
+# (r,g,b,a) tuples — use _mk_color() to create fresh ColorRGBA per marker
 TYPE_COLORS = {
-    0: ColorRGBA(r=1.0, g=0.5, b=0.0, a=0.6),   # orange — obstacle
-    1: ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.7),   # red — pole
-    2: ColorRGBA(r=1.0, g=1.0, b=0.0, a=0.5),   # yellow — bump
-    3: ColorRGBA(r=0.0, g=0.5, b=0.0, a=0.45),  # deep green — slope
-    4: ColorRGBA(r=1.0, g=0.8, b=0.0, a=0.5),   # amber — rough terrain
-    5: ColorRGBA(r=0.5, g=0.0, b=1.0, a=0.6),   # purple — pothole
+    0: (1.0, 0.5, 0.0, 0.6),   # orange — obstacle
+    1: (1.0, 0.0, 0.0, 0.7),   # red — pole
+    2: (1.0, 1.0, 0.0, 0.5),   # yellow — bump
+    3: (0.0, 0.5, 0.0, 0.45),  # deep green — slope
+    4: (1.0, 0.8, 0.0, 0.5),   # amber — rough terrain
+    5: (0.5, 0.0, 1.0, 0.6),   # purple — pothole
 }
+
+
+def _mk_color(type_id: int, alpha_override: float = None) -> ColorRGBA:
+    """Fresh ColorRGBA per marker (avoids shared-mutation across markers)."""
+    r, g, b, a = TYPE_COLORS.get(type_id, TYPE_COLORS[0])
+    if alpha_override is not None:
+        a = alpha_override
+    return ColorRGBA(r=r, g=g, b=b, a=a)
 
 
 def _pc2_to_xyz(msg: PointCloud2) -> np.ndarray:
@@ -150,19 +159,23 @@ def _step_heights(features: dict) -> dict:
 
 
 def _ring_gradient(features: dict, xyz: np.ndarray) -> dict:
-    """Max |Z diff| between adjacent rings within same voxel (Gazebo fallback ring)."""
+    """Max |Z diff| between adjacent rings within same voxel. O(n) via ring grouping."""
     rings = _compute_ring(xyz)
-    for key, cell in features.items():
+    for cell in features.values():
         idx = cell['pts']
         if len(idx) < 2:
             cell['ring_gradient'] = 0.0
             continue
-        r, z = rings[idx], xyz[idx, 2]
+        # group mean Z by ring
+        ring_z = {}
+        for i in idx:
+            r = int(rings[i])
+            ring_z.setdefault(r, []).append(xyz[i, 2])
+        ring_means = {r: float(np.mean(zs)) for r, zs in ring_z.items()}
         mg = 0.0
-        for i in range(len(idx)):
-            for j in range(i + 1, len(idx)):
-                if abs(int(r[i]) - int(r[j])) == 1:
-                    mg = max(mg, abs(float(z[i]) - float(z[j])))
+        for r in ring_means:
+            if r + 1 in ring_means:
+                mg = max(mg, abs(ring_means[r] - ring_means[r + 1]))
         cell['ring_gradient'] = mg
     return features
 
@@ -400,9 +413,14 @@ class VoxelAnalyzer(Node):
         for tid in [t for t in self._tracks if not self._tracks[t]['_m']]:
             self._tracks[tid]['lc'] += 1
             if self._tracks[tid]['lc'] > mlost: del self._tracks[tid]
-        return {ci: (self._tracks[tid]['type_id'], self._tracks[tid]['label'])
-                if (tid := a.get(ci)) and tid in self._tracks else (tids[ci], labels[ci])
-                for ci in range(len(cents))}
+        result = {}
+        for ci in range(len(cents)):
+            tid = a.get(ci)
+            if tid is not None and tid in self._tracks:
+                result[ci] = (self._tracks[tid]['type_id'], self._tracks[tid]['label'])
+            else:
+                result[ci] = (tids[ci], labels[ci])
+        return result
 
     def _cb_g(self, msg: PointCloud2):
         g = _pc2_to_xyz(msg)
@@ -415,7 +433,7 @@ class VoxelAnalyzer(Node):
                 m = Marker(header=Header(frame_id=msg.header.frame_id, stamp=now),
                            ns='pothole', id=i, type=Marker.SPHERE, action=Marker.ADD)
                 m.pose.position.x, m.pose.position.y, m.pose.position.z = cx, cy, -d / 2
-                m.scale.x = m.scale.y = m.scale.z = 0.3; m.color = TYPE_COLORS[TYPE_POTHOLE]
+                m.scale.x = m.scale.y = m.scale.z = 0.3; m.color = _mk_color(TYPE_POTHOLE)
                 m.lifetime.nanosec = 500_000_000; m.text = f'pothole_{d*100:.0f}cm'
                 ma.markers.append(m)
             self.pub_pot.publish(ma)
@@ -461,22 +479,21 @@ class VoxelAnalyzer(Node):
                           f'E={of["edge_ratio"]:.2f} S={of["slope_deg"]:.1f}deg '
                           f'V={of["verticality"]:.2f} H={of["dims"][2]:.2f}m → {sl}')
 
-            col = TYPE_COLORS.get(st, TYPE_COLORS[0]); dm, ct = of['dims'], of['centroid']; lt = 300_000_000
+            dm, ct = of['dims'], of['centroid']; lt = 300_000_000
 
             box = Marker(header=Header(frame_id=fid, stamp=now), ns=TYPE_LABELS[st], id=i,
                          type=Marker.CUBE, action=Marker.ADD)
             box.pose.position.x, box.pose.position.y, box.pose.position.z = float(ct[0]), float(ct[1]), float(ct[2])
             box.pose.orientation.w = 1.0
             box.scale.x, box.scale.y, box.scale.z = float(dm[0]), float(dm[1]), float(dm[2])
-            box.color = col; box.lifetime.nanosec = lt
-            if not hi: box.color.a = 0.25
+            box.color = _mk_color(st, 0.25 if not hi else None); box.lifetime.nanosec = lt
             (bh if hi else bl).markers.append(box)
 
             ctr = Marker(header=Header(frame_id=fid, stamp=now), ns=TYPE_LABELS[st], id=i,
                          type=Marker.SPHERE, action=Marker.ADD)
             ctr.pose.position.x, ctr.pose.position.y, ctr.pose.position.z = float(ct[0]), float(ct[1]), float(ct[2])
-            ctr.scale.x = ctr.scale.y = ctr.scale.z = 0.25; ctr.color = col
-            if not hi: ctr.color.a = 0.25
+            ctr.scale.x = ctr.scale.y = ctr.scale.z = 0.25
+            ctr.color = _mk_color(st, 0.25 if not hi else None)
             ctr.lifetime.nanosec = lt; ctr.text = f'{sl} c{c:.1f}'; ch.markers.append(ctr)
 
         self.pub_boxes.publish(bh); self.pub_cents.publish(ch)
