@@ -36,23 +36,47 @@ ros2 launch lidar3d_bringup play_and_viz.launch.py enable_ground_seg:=false
                            → obstacle_adapter → /obstacle_markers
 ```
 
-### 3D 链路（`use_3d_clustering:=true` 时启用，与 2D 并行）
+### 3D-PCA 链路（`use_3d_clustering:=true`）
 
 ```text
 /patchworkpp/nonground
   → euclidean_cluster_3d (3D 体素聚类) → /clusters/points_3d
-    → cluster_analyzer (PCA 几何分析 + 规则分类) → /obstacles/boxes_3d
+    → cluster_analyzer (PCA 特征 + 规则分类 + 时序追踪) → /obstacles/boxes_3d
       → obstacle_adapter → /obstacle_markers
 ```
 
-**3D 链路分类输出**：
+### 3D-体素链路（`use_voxel_analyzer:=true`，2026-07-30 新增）
 
-| 类型 | type_id | 颜色 | 判断条件 |
-|------|---------|------|---------|
-| **slope** (可通过坡面) | 3 | 深绿 | 平面性 >0.85, 倾角 <15°, 高度 <2m |
-| **bump** (减速带/低坎) | 2 | 黄 | 低矮 (<0.25m) 或低平面 (<0.3m) |
-| **pole** (杆状物) | 1 | 红 | 线性 >0.7, 高宽比 >2.5 |
-| **obstacle** (不可通过) | 0 | 橙 | 其余非地面物体 |
+```text
+/patchworkpp/nonground
+  → voxel_analyzer (多分辨率体素网格 + 几何特征 + 体素聚类) → /obstacles/boxes_3d_voxel
+    → obstacle_adapter → /obstacle_markers
+```
+
+体素网格：0-15m:0.1m, 15-30m:0.2m, 30-50m:0.4m。每格去最高 5% 浮点，提取 z_range/z_variance/density，26 邻域体素聚类。
+
+**所有 3D 链路分类输出**：
+
+| 类型 | type_id | 颜色 | 含义 |
+|------|---------|------|------|
+| **slope** | 3 | 深绿 | 可通过坡面 |
+| **bump** | 2 | 黄 | 减速带/低坎 |
+| **pole** | 1 | 红 | 杆状障碍物 |
+| **obstacle** | 0 | 橙 | 不可通过 |
+
+## 节点一览
+
+| 可执行文件 | 节点名 | 功能 |
+|-----------|--------|------|
+| `tf_bridge` | `sensor_tf_bridge` | 动态 TF 广播 (base_link→sensor, 10Hz /tf) |
+| `pointcloud_filter` | `pointcloud_filter` | 距离+高度+角度过滤 |
+| `euclidean_cluster_3d` | `euclidean_cluster_3d` | 3D 体素洪水填充聚类 |
+| `cluster_analyzer` | `cluster_analyzer` | **PCA 链路**: PCA特征+4类规则+时序追踪+置信度 |
+| `voxel_analyzer` | `voxel_analyzer` | **体素链路**: 多分辨率网格+几何特征+体素聚类 |
+| `cluster_bbox` | `cluster_bbox` | 2D 包围盒生成 |
+| `obstacle_adapter` | `obstacle_adapter` | TF 变换+类型透传 → `/obstacle_markers` |
+| `road_analyzer` | `road_analyzer` | 路沿检测+中心线(调试) |
+| `tf_publisher` | `tf_publisher` | rosbag 模式 TF 发布 |
 
 ## 全部启动参数
 
@@ -80,7 +104,8 @@ ros2 launch lidar3d_bringup play_and_viz.launch.py enable_ground_seg:=false
 |--------|---------|---------|
 | `rviz2_raw` | `lidar3d_raw.rviz` | 过滤后原始点云 (`/cx/lslidar_point_cloud_filtered`) |
 | `rviz2_proc` | `lidar3d_processed.rviz` | 地面/非地面、2D 包围盒 |
-| `rviz2_3d` | `lidar3d_3d.rviz` | 3D 聚类点云、PCA 分类标记（仅 3D 模式） |
+| `rviz2_3d` | `lidar3d_3d.rviz` | 3D 聚类点云、PCA 分类标记（PCA 模式） |
+| `rviz2_voxel` | `lidar3d_voxel.rviz` | 体素分类 (高/低置信)、地面/非地面（体素模式自动开启） |
 
 ## 主要包
 
