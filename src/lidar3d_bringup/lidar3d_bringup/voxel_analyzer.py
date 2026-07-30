@@ -284,51 +284,72 @@ def _object_features(obj: dict, feat: dict, xyz: np.ndarray, ground_z: float = N
 
 
 def _classify(of: dict) -> tuple:
-    """Boundary-first classification: obstacles first, then passable terrain."""
+    """Strict obstacle detection: require strong evidence. Default = passable."""
     H = float(of['dims'][2])
 
     # ---- 0. size sanity: too large = terrain ----
     if of['max_dim'] > 8.0 or (of['width'] > 6.0 and of['slope_deg'] < 20):
         return TYPE_SLOPE, f'slope_big_H{H:.1f}m'
 
-    # ==== OBSTACLE DETECTION (boundary-first) ====
+    # ==== OBSTACLE: require MULTIPLE strong signals ====
+    obs_score = 0
 
-    # 1. sharp boundary + meaningful height → obstacle edge
-    if of['edge_ratio'] > 0.25 and H > 0.2:
-        return TYPE_OBSTACLE, f'obs_edge{of["edge_ratio"]:.1f}_H{H:.1f}m'
+    # sharp boundary + meaningful height
+    if of['edge_ratio'] > 0.35 and H > 0.3:
+        obs_score += 2
+    elif of['edge_ratio'] > 0.25 and H > 0.2:
+        obs_score += 1
 
-    # 2. elevated above local ground → floating obstacle
-    if of['relative_elevation'] > 0.15 and of['total_n'] > 10:
-        return TYPE_OBSTACLE, f'obs_elev{of["relative_elevation"]:.2f}m'
+    # elevated above local ground
+    if of['relative_elevation'] > 0.2 and of['total_n'] > 15:
+        obs_score += 2
+    elif of['relative_elevation'] > 0.12:
+        obs_score += 1
 
-    # 3. sudden vertical step → obstacle boundary
-    if of['mean_step_height'] > 0.12 and H > 0.3:
-        return TYPE_OBSTACLE, f'obs_step{of["mean_step_height"]:.2f}_H{H:.1f}m'
+    # sudden vertical step
+    if of['mean_step_height'] > 0.15 and H > 0.4:
+        obs_score += 2
+    elif of['mean_step_height'] > 0.10:
+        obs_score += 1
 
-    # 4. high verticality + tall → wall-like obstacle
-    if of['verticality'] > 0.75 and H > 0.5:
-        return TYPE_OBSTACLE, f'obs_vert{of["verticality"]:.2f}_H{H:.1f}m'
+    # high verticality = wall-like
+    if of['verticality'] > 0.80 and H > 0.6:
+        obs_score += 2
+    elif of['verticality'] > 0.70 and H > 0.4:
+        obs_score += 1
 
-    # ==== PASSABLE TERRAIN (obstacles ruled out) ====
+    # only flag obstacle with strong consensus (≥4 points)
+    if obs_score >= 4:
+        reasons = []
+        if of['edge_ratio'] > 0.25: reasons.append(f'E{of["edge_ratio"]:.1f}')
+        if of['relative_elevation'] > 0.12: reasons.append(f'el{of["relative_elevation"]:.2f}')
+        if of['mean_step_height'] > 0.10: reasons.append(f'st{of["mean_step_height"]:.2f}')
+        if of['verticality'] > 0.70: reasons.append(f'v{of["verticality"]:.2f}')
+        return TYPE_OBSTACLE, f'obs_{"+".join(reasons)}'
 
-    # 5. pole: vertical, tall, thin (not obstacle because sparse & isolated)
+    # ==== PASSABLE TERRAIN (default assumption) ====
+
+    # pole: vertical, tall, thin
     if of['verticality'] > 0.85 and H > 0.3 and of['width_min'] < 0.5:
         return TYPE_POLE, f'pole_H{H:.1f}m'
 
-    # 6. bump: low, sharp ring gradient or curvature
+    # bump: low, sharp ring gradient or curvature
     if H < 0.3 and (of['max_ring_gradient'] > 0.05 or of['curvature'] > 0.02):
         return TYPE_BUMP, f'bump_H{H:.2f}m'
 
-    # 7. slope: gentle, smooth, low edge
+    # slope: gentle, smooth, low edge
     if of['slope_deg'] < 15.0 and of['mean_step_height'] < 0.08 and of['edge_ratio'] < 0.2:
         return TYPE_SLOPE, f'slope_{of["slope_deg"]:.0f}deg'
 
-    # 8. rough: bumpy but not steep
+    # rough terrain: bumpy but not steep
     if of['mean_roughness'] > 0.01 and of['slope_deg'] < 10.0:
         return TYPE_ROUGH, f'rough_R{of["mean_roughness"]:.3f}'
 
-    # fallback
-    return TYPE_OBSTACLE, f'obs_H{H:.1f}m'
+    # default: assume passable (low, gentle slope unless proven otherwise)
+    if H < 2.0 and of['slope_deg'] < 20:
+        return TYPE_SLOPE, f'slope_low_{of["slope_deg"]:.0f}deg'
+
+    return TYPE_SLOPE, f'terrain_H{H:.1f}m'
 
 
 # ======================================================================
