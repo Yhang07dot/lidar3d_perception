@@ -37,6 +37,7 @@ setup(
             'euclidean_cluster_3d = lidar3d_bringup.euclidean_cluster_3d:main',  # 2026-07-29: 3D pipeline
             'cluster_analyzer = lidar3d_bringup.cluster_analyzer:main',           # 2026-07-29: 3D pipeline
             'road_analyzer = lidar3d_bringup.road_analyzer:main',                 # 2026-07-29: LiDAR perception
+            'voxel_analyzer = lidar3d_bringup.voxel_analyzer:main',                 # 2026-07-30: voxel-based analysis
         ],
     },
 )

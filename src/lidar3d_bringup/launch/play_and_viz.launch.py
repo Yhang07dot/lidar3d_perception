@@ -174,7 +174,7 @@ def launch_setup(context, *args, **kwargs):
             # 2026-07-29: sim mode uses Gazebo sensor frame directly
             'source_frame': 'laser_link' if is_rosbag else 'baja_vehicle/base_link/lidar',
             # 2026-07-29: switch to 3D pipeline output when use_3d_clustering:=true
-            'input_topic': '/obstacles/boxes_3d' if use_3d else '/obstacles/boxes',
+            'input_topic': '/obstacles/boxes_3d_voxel' if use_voxel else ('/obstacles/boxes_3d' if use_3d else '/obstacles/boxes'),
             'passthrough': use_3d,  # 2026-07-29: 3D pipeline provides ns classification
         }],
         condition=seg_enabled,
@@ -198,6 +198,17 @@ def launch_setup(context, *args, **kwargs):
 
     # --- LiDAR perception replacing truth data (controlled by use_lidar_perception) ---
     lidar_percep_cond = IfCondition(LaunchConfiguration('use_lidar_perception'))
+
+    # --- 2026-07-30: voxel-based analyser (parallel to cluster_analyzer) ---
+    use_voxel = LaunchConfiguration('use_voxel_analyzer').perform(context).lower() == 'true'
+    voxel_cond = IfCondition(LaunchConfiguration('use_voxel_analyzer'))
+
+    voxel_node = Node(
+        package='lidar3d_bringup', executable='voxel_analyzer',
+        name='voxel_analyzer', output='screen',
+        parameters=[{'use_sim_time': use_sim_time_val}],
+        condition=voxel_cond,
+    )
 
     road_node = Node(
         package='lidar3d_bringup', executable='road_analyzer',
@@ -244,6 +255,8 @@ def launch_setup(context, *args, **kwargs):
     nodes.extend([cluster_3d_node, analyzer_node])
     # 2026-07-29: LiDAR perception replacing truth data
     nodes.append(road_node)
+    # 2026-07-30: voxel analyser (parallel to cluster_analyzer)
+    nodes.append(voxel_node)
     nodes.extend([rviz_raw_node, rviz_proc_node, rviz_3d_node])
 
     return nodes
@@ -289,6 +302,8 @@ def generate_launch_description():
             description='Enable 3D Euclidean clustering + PCA analysis (parallel to 2D)'),
         DeclareLaunchArgument('use_lidar_perception', default_value='false',
             description='Replace truth_perception data with LiDAR-based road boundaries+obstacles'),
+        DeclareLaunchArgument('use_voxel_analyzer', default_value='false',
+            description='Use voxel-grid analyser instead of PCA-on-clusters'),
         DeclareLaunchArgument('use_rviz_raw', default_value='true',
             description='Show raw filtered point cloud rviz2 window'),
         DeclareLaunchArgument('use_rviz_proc', default_value='true',
