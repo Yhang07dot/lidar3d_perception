@@ -1,0 +1,77 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Frame Timeout: 10
+      All Enabled: true
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Ground
+      Enabled: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Best Effort
+        Value: /patchworkpp/ground
+      Style: Points
+      Size (Pixels): 2
+      Size (m): 0.03
+      Decay Time: 0.8
+      Color Transformer: FlatColor
+      Color: 100; 200; 100
+      Selectable: true
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Non-Ground
+      Enabled: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Best Effort
+        Value: /patchworkpp/nonground
+      Style: Points
+      Size (Pixels): 2
+      Size (m): 0.05
+      Decay Time: 0.8
+      Color Transformer: FlatColor
+      Color: 255; 150; 150
+      Selectable: true
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Voxel Boxes (高置信)
+      Enabled: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        Value: /obstacles/boxes_3d_voxel
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Voxel Centers (高置信)
+      Enabled: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        Value: /obstacles/centers_3d_voxel
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Low-Confidence (调试)
+      Enabled: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        Value: /lidar/low_confidence_voxel
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: odom
+    Frame Rate: 30
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure

@@ -61,6 +61,7 @@ def launch_setup(context, *args, **kwargs):
     rviz_raw = os.path.join(pkg_share, 'rviz', 'lidar3d_raw.rviz')
     rviz_proc = os.path.join(pkg_share, 'rviz', 'lidar3d_processed.rviz')
     rviz_3d = os.path.join(pkg_share, 'rviz', 'lidar3d_3d.rviz')
+    rviz_voxel = os.path.join(pkg_share, 'rviz', 'lidar3d_voxel.rviz')
 
     # --- filter params ---
     filter_params = {'use_sim_time': use_sim_time_val}
@@ -242,6 +243,12 @@ def launch_setup(context, *args, **kwargs):
         parameters=[{'use_sim_time': use_sim_time_val}], output='screen',
         condition=IfCondition(LaunchConfiguration('use_rviz_3d')),
     )
+    rviz_voxel_node = Node(
+        package='rviz2', executable='rviz2', name='rviz2_voxel',
+        arguments=['-d', rviz_voxel],
+        parameters=[{'use_sim_time': use_sim_time_val}], output='screen',
+        condition=voxel_cond,
+    )
 
     # --- assembly ---
     nodes = []
@@ -263,7 +270,7 @@ def launch_setup(context, *args, **kwargs):
     nodes.append(road_node)
     # 2026-07-30: voxel analyser (parallel to cluster_analyzer)
     nodes.append(voxel_node)
-    nodes.extend([rviz_raw_node, rviz_proc_node, rviz_3d_node])
+    nodes.extend([rviz_raw_node, rviz_proc_node, rviz_3d_node, rviz_voxel_node])
 
     return nodes
 
