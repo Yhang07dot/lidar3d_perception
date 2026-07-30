@@ -226,7 +226,7 @@ class ClusterAnalyzer(Node):
         self.declare_parameter('tracking_distance_threshold', 2.0)  # m, max centroid shift to match
         self.declare_parameter('tracking_history_size', 10)         # frames of history for mode voting
         self.declare_parameter('tracking_max_lost', 3)              # frames before removing stale track
-        self.declare_parameter('confidence_threshold', 0.5)         # below → low-confidence debug topic
+        self.declare_parameter('confidence_threshold', 0.35)        # <0.35→debug topic. 坡闪烁→降低(0.3),噪点多→升高(0.5)
         self.declare_parameter('log_interval', 10)                  # frames between summary logs
 
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)

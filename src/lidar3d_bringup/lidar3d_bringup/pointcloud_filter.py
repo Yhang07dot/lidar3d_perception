@@ -5,11 +5,17 @@ PointCloud2 range & height filter.
 Filters points by:
   - Distance from sensor: min_range ≤ sqrt(x²+y²+z²) ≤ max_range
   - Height (Z in laser_link frame): min_height ≤ z ≤ max_height
+  - Horizontal angle (2026-07-30): |arctan2(y,x)| ≤ angle_limit_deg
+    (±135° keeps front+sides, discards rear 90°. 180°=no filter. Tune via ros2 param set)
 
 Publishes filtered PointCloud2 to /cx/lslidar_point_cloud_filtered.
 
-All thresholds are ROS2 parameters (adjustable at runtime via rqt_reconfigure
-or launch args without recompiling).
+All thresholds are ROS2 parameters (adjustable at runtime via ros2 param set or launch args).
+
+Tuning guide (2026-07-30):
+  max_range: 16线LiDAR建议≤25m。50m时束间距~1.75m,PCA不可靠→幽灵障碍物
+  angle_limit_deg: 车用=135(去后方)。若需全向感知设为180
+  confidence_threshold (cluster_analyzer): 坡闪烁→降低(0.35), 噪点多→升高(0.6)
 """
 
 import numpy as np
@@ -26,16 +32,19 @@ class PointCloudFilter(Node):
         super().__init__('pointcloud_filter')
 
         # ——— Tunable parameters ———
-        self.declare_parameter('max_range', 10.0)
-        self.declare_parameter('min_range', 0.1)
-        self.declare_parameter('min_height', -3.0)
-        self.declare_parameter('max_height', 5.0)
+        # 2026-07-30: distance/height/angle filters. All runtime-tunable via ros2 param set.
+        self.declare_parameter('max_range', 25.0)      # max distance (m). 16-line: ≤25 recommended
+        self.declare_parameter('min_range', 0.1)       # min distance (m), removes self-hits
+        self.declare_parameter('min_height', -3.0)     # min Z (m), negative = below sensor
+        self.declare_parameter('max_height', 5.0)      # max Z (m)
+        self.declare_parameter('angle_limit_deg', 135.0)  # half-angle (deg). 135=±135°(front+sides). 180=360°(all)
 
         # Read initial values
         self.max_range = self.get_parameter('max_range').value
         self.min_range = self.get_parameter('min_range').value
         self.min_height = self.get_parameter('min_height').value
         self.max_height = self.get_parameter('max_height').value
+        self.angle_limit_deg = self.get_parameter('angle_limit_deg').value  # 2026-07-30
 
         # Watch for parameter changes at runtime
         self.add_on_set_parameters_callback(self._on_param_change)
@@ -58,7 +67,8 @@ class PointCloudFilter(Node):
         self.get_logger().info(
             f'Filter ready: '
             f'range=[{self.min_range:.1f}, {self.max_range:.1f}]m, '
-            f'height=[{self.min_height:.1f}, {self.max_height:.1f}]m'
+            f'height=[{self.min_height:.1f}, {self.max_height:.1f}]m, '
+            f'angle_limit={self.angle_limit_deg:.0f}deg'
         )
 
     def _on_param_change(self, params):
@@ -71,10 +81,13 @@ class PointCloudFilter(Node):
                 self.min_height = p.value
             elif p.name == 'max_height':
                 self.max_height = p.value
+            elif p.name == 'angle_limit_deg':       # 2026-07-30
+                self.angle_limit_deg = p.value
         self.get_logger().info(
             f'Params updated: '
             f'range=[{self.min_range:.1f}, {self.max_range:.1f}]m, '
-            f'height=[{self.min_height:.1f}, {self.max_height:.1f}]m'
+            f'height=[{self.min_height:.1f}, {self.max_height:.1f}]m, '
+            f'angle_limit={self.angle_limit_deg:.0f}deg'
         )
         return rclpy.parameter.SetParametersResult(successful=True)
 
@@ -106,9 +119,16 @@ class PointCloudFilter(Node):
 
         # --- Filter ---
         dist = np.sqrt(x**2 + y**2 + z**2)
+        # 2026-07-30: horizontal angle filter — discards points behind vehicle
+        # x=forward, y=left. arctan2(y,x)=0=forward, ±pi=rear
+        # angle_limit_deg=135 → keep |angle|≤135° (front+sides, discard rear 90°)
+        # angle_limit_deg=180 → keep all 360° (no angle filter)
+        angle = np.arctan2(y, x)
+        angle_limit_rad = np.radians(self.angle_limit_deg)
         mask = (
             (dist >= self.min_range) & (dist <= self.max_range) &
-            (z >= self.min_height) & (z <= self.max_height)
+            (z >= self.min_height) & (z <= self.max_height) &
+            (np.abs(angle) <= angle_limit_rad)
         )
         keep_idx = np.where(mask)[0]
 
