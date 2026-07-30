@@ -284,36 +284,50 @@ def _object_features(obj: dict, feat: dict, xyz: np.ndarray, ground_z: float = N
 
 
 def _classify(of: dict) -> tuple:
+    """Boundary-first classification: obstacles first, then passable terrain."""
     H = float(of['dims'][2])
 
-    # size sanity: very large objects are terrain, not obstacles
+    # ---- 0. size sanity: too large = terrain ----
     if of['max_dim'] > 8.0 or (of['width'] > 6.0 and of['slope_deg'] < 20):
         return TYPE_SLOPE, f'slope_big_H{H:.1f}m'
 
-    # pole: vertical, tall, thin
-    if of['verticality'] > 0.85 and H > 0.3 and of['width_min'] < 0.5:
-        return TYPE_POLE, f'pole_H{H:.1f}m'
+    # ==== OBSTACLE DETECTION (boundary-first) ====
 
-    # elevated above ground → obstacle
+    # 1. sharp boundary + meaningful height → obstacle edge
+    if of['edge_ratio'] > 0.25 and H > 0.2:
+        return TYPE_OBSTACLE, f'obs_edge{of["edge_ratio"]:.1f}_H{H:.1f}m'
+
+    # 2. elevated above local ground → floating obstacle
     if of['relative_elevation'] > 0.15 and of['total_n'] > 10:
         return TYPE_OBSTACLE, f'obs_elev{of["relative_elevation"]:.2f}m'
 
-    # sharp boundary + enough height → obstacle
-    if of['edge_ratio'] > 0.3 and H > 0.25:
-        return TYPE_OBSTACLE, f'obs_edge{of["edge_ratio"]:.1f}_H{H:.1f}m'
+    # 3. sudden vertical step → obstacle boundary
+    if of['mean_step_height'] > 0.12 and H > 0.3:
+        return TYPE_OBSTACLE, f'obs_step{of["mean_step_height"]:.2f}_H{H:.1f}m'
 
-    # bump: low height + sharp ring gradient or high curvature
+    # 4. high verticality + tall → wall-like obstacle
+    if of['verticality'] > 0.75 and H > 0.5:
+        return TYPE_OBSTACLE, f'obs_vert{of["verticality"]:.2f}_H{H:.1f}m'
+
+    # ==== PASSABLE TERRAIN (obstacles ruled out) ====
+
+    # 5. pole: vertical, tall, thin (not obstacle because sparse & isolated)
+    if of['verticality'] > 0.85 and H > 0.3 and of['width_min'] < 0.5:
+        return TYPE_POLE, f'pole_H{H:.1f}m'
+
+    # 6. bump: low, sharp ring gradient or curvature
     if H < 0.3 and (of['max_ring_gradient'] > 0.05 or of['curvature'] > 0.02):
         return TYPE_BUMP, f'bump_H{H:.2f}m'
 
-    # slope: gentle, smooth, low edge ratio
+    # 7. slope: gentle, smooth, low edge
     if of['slope_deg'] < 15.0 and of['mean_step_height'] < 0.08 and of['edge_ratio'] < 0.2:
         return TYPE_SLOPE, f'slope_{of["slope_deg"]:.0f}deg'
 
-    # rough terrain: bumpy but not steep
+    # 8. rough: bumpy but not steep
     if of['mean_roughness'] > 0.01 and of['slope_deg'] < 10.0:
         return TYPE_ROUGH, f'rough_R{of["mean_roughness"]:.3f}'
 
+    # fallback
     return TYPE_OBSTACLE, f'obs_H{H:.1f}m'
 
 
