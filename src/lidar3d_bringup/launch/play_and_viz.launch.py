@@ -26,6 +26,14 @@ from launch_ros.actions import Node
 
 
 def launch_setup(context, *args, **kwargs):
+    # --- Load YAML config ---
+    pkg_share = get_package_share_directory('lidar3d_bringup')
+    params_file = LaunchConfiguration('params_file').perform(context)
+    if params_file == '__default__':
+        params_file = os.path.join(pkg_share, 'config', 'lidar_params.yaml')
+    else:
+        params_file = os.path.expanduser(params_file)
+
     # --- source params ---
     src = LaunchConfiguration('input_source').perform(context)
     raw_topic = LaunchConfiguration('cloud_topic').perform(context)
@@ -53,7 +61,6 @@ def launch_setup(context, *args, **kwargs):
 
     bag_dir = os.path.expanduser(bag_dir)
 
-    pkg_share = get_package_share_directory('lidar3d_bringup')
     rviz_raw = os.path.join(pkg_share, 'rviz', 'lidar3d_raw.rviz')
     rviz_proc = os.path.join(pkg_share, 'rviz', 'lidar3d_processed.rviz')
     rviz_voxel = os.path.join(pkg_share, 'rviz', 'lidar3d_voxel.rviz')
@@ -118,7 +125,7 @@ def launch_setup(context, *args, **kwargs):
     filter_node = Node(
         package='lidar3d_bringup', executable='pointcloud_filter',
         name='pointcloud_filter', output='screen',
-        parameters=[filter_params],
+        parameters=[params_file, filter_params],
         remappings=[('input_cloud', cloud_topic)],
     )
 
@@ -175,12 +182,15 @@ def launch_setup(context, *args, **kwargs):
     adapter_node = Node(
         package='lidar3d_bringup', executable='obstacle_adapter',
         name='obstacle_adapter', output='screen',
-        parameters=[{
-            'use_sim_time': use_sim_time_val,
-            'source_frame': 'laser_link' if is_rosbag else 'baja_vehicle/base_link/lidar',
-            'input_topic': adapter_input,
-            'passthrough': use_voxel or use_surface,
-        }],
+        parameters=[
+            params_file,
+            {
+                'use_sim_time': use_sim_time_val,
+                'source_frame': 'laser_link' if is_rosbag else 'baja_vehicle/base_link/lidar',
+                'input_topic': adapter_input,
+                'passthrough': use_voxel or use_surface,
+            }
+        ],
         condition=seg_enabled,
     )
 
@@ -193,14 +203,14 @@ def launch_setup(context, *args, **kwargs):
     voxel_node = Node(
         package='lidar3d_bringup', executable='voxel_analyzer',
         name='voxel_analyzer', output='screen',
-        parameters=[{'use_sim_time': use_sim_time_val}],
+        parameters=[params_file, {'use_sim_time': use_sim_time_val}],
         condition=voxel_cond,
     )
 
     road_node = Node(
         package='lidar3d_bringup', executable='road_analyzer',
         name='road_analyzer', output='screen',
-        parameters=[{'use_sim_time': use_sim_time_val}],
+        parameters=[params_file, {'use_sim_time': use_sim_time_val}],
         condition=lidar_percep_cond,
     )
 
@@ -208,7 +218,7 @@ def launch_setup(context, *args, **kwargs):
     surface_node = Node(
         package='lidar3d_bringup', executable='surface_detector',
         name='surface_detector', output='screen',
-        parameters=[{'use_sim_time': use_sim_time_val}],
+        parameters=[params_file, {'use_sim_time': use_sim_time_val}],
         condition=IfCondition(LaunchConfiguration('use_surface_detector')),
     )
 
@@ -266,6 +276,10 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('input_source', default_value='rosbag',
             description="'rosbag' | 'simulation' | 'lidar'"),
+
+        # --- Parameter file ---
+        DeclareLaunchArgument('params_file', default_value='__default__',
+            description='Path to YAML parameter file (default: config/lidar_params.yaml)'),
 
         # --- cloud_topic — auto-set per input_source ---
         DeclareLaunchArgument('cloud_topic', default_value='__auto__',

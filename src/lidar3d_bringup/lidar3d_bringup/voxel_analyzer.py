@@ -78,8 +78,39 @@ def _pc2_to_xyz(msg: PointCloud2) -> np.ndarray:
     return np.column_stack([points['x'], points['y'], points['z']])
 
 
-# ⚠ Gazebo bridge drops native ring field. Compute from vertical angle as fallback.
-# Real VLP-16 driver includes ring natively — use points['ring'] when available.
+# ⚠ Ring field handling: LSLidar C16 should have native 'ring' field.
+# This function auto-detects and uses native ring if available, falls back to computation.
+# TODO: After receiving LSLidar C16, verify the ring field name in the point cloud message.
+#       If the field name is not 'ring' (e.g., 'ring_id'), update the YAML config:
+#       sensor.ring_field_name in config/lidar_params.yaml
+def _get_ring_field(msg: PointCloud2, xyz: np.ndarray, ring_field_name: str = 'ring') -> np.ndarray:
+    """Get ring indices: use native field if available, else compute from vertical angle.
+
+    Args:
+        msg: PointCloud2 message
+        xyz: Nx3 array of (x, y, z) coordinates
+        ring_field_name: Name of the ring field to look for (default: 'ring')
+
+    Returns:
+        Nx1 array of ring indices (0-15 for 16-line LiDAR)
+    """
+    names = [f.name for f in msg.fields]
+
+    # Try to use native ring field (real LSLidar C16)
+    if ring_field_name in names:
+        formats = [DTYPE_MAP[f.datatype] for f in msg.fields]
+        offsets = [f.offset for f in msg.fields]
+        dtype = np.dtype({'names': names, 'formats': formats,
+                          'offsets': offsets, 'itemsize': msg.point_step})
+        points = np.frombuffer(msg.data, dtype=dtype)
+        return points[ring_field_name].astype(np.int32)
+
+    # Fallback: compute from vertical angle (Gazebo simulation or missing ring field)
+    return _compute_ring(xyz)
+
+
+# Fallback computation for Gazebo (native ring field not available)
+# Real VLP-16/LSLidar C16 drivers include ring natively — use _get_ring_field() instead.
 def _compute_ring(xyz: np.ndarray) -> np.ndarray:
     v_deg = np.degrees(np.arctan2(xyz[:, 2], np.sqrt(xyz[:, 0]**2 + xyz[:, 1]**2)))
     return np.clip(((v_deg + 15.0) / 2.0).astype(np.int32), 0, 15)
@@ -158,9 +189,9 @@ def _step_heights(features: dict) -> dict:
     return features
 
 
-def _ring_gradient(features: dict, xyz: np.ndarray) -> dict:
+def _ring_gradient(features: dict, msg: PointCloud2, xyz: np.ndarray, ring_field_name: str = 'ring') -> dict:
     """Max |Z diff| between adjacent rings within same voxel. O(n) via ring grouping."""
-    rings = _compute_ring(xyz)
+    rings = _get_ring_field(msg, xyz, ring_field_name)
     for cell in features.values():
         idx = cell['pts']
         if len(idx) < 2:
@@ -407,7 +438,7 @@ class VoxelAnalyzer(Node):
                       ('max_dim', 15.0), ('confidence_threshold', 0.35),
                       ('tracking_distance_threshold', 2.0), ('tracking_history_size', 10),
                       ('tracking_max_lost', 3), ('log_interval', 10), ('edge_z_range', 0.15),
-                      ('pothole_depth_m', 0.08)]:
+                      ('pothole_depth_m', 0.08), ('ring_field_name', 'ring')]:
             self.declare_parameter(p, v)
 
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -477,11 +508,14 @@ class VoxelAnalyzer(Node):
         self._fc += 1; xyz = _pc2_to_xyz(msg)
         if len(xyz) < 20: return
 
+        # Get ring field name from ROS parameter (default: 'ring')
+        ring_field_name = self.get_parameter('ring_field_name').value
+
         grid = _remove_outliers(_build_multires_grid(xyz), xyz, self.get_parameter('outlier_pct').value)
         feat = _voxel_features(grid, xyz)
         if not feat: return
         feat = _step_heights(feat)
-        feat = _ring_gradient(feat, xyz)
+        feat = _ring_gradient(feat, msg, xyz, ring_field_name)
 
         objs = _cluster_voxels(feat)
         now = self.get_clock().now().to_msg(); fid = msg.header.frame_id
