@@ -40,6 +40,7 @@ def launch_setup(context, *args, **kwargs):
     # 2026-07-29: 3D clustering pipeline (parallel to 2D, for slope-obstacle discrimination)
     use_lidar_percep = LaunchConfiguration('use_lidar_perception').perform(context).lower() == 'true'
     use_voxel = LaunchConfiguration('use_voxel_analyzer').perform(context).lower() == 'true'
+    use_surface = LaunchConfiguration('use_surface_detector').perform(context).lower() == 'true'
 
     # Use_ ROS bag params (only in rosbag mode)
     bag_dir = LaunchConfiguration('bag_dir').perform(context)
@@ -56,6 +57,7 @@ def launch_setup(context, *args, **kwargs):
     rviz_raw = os.path.join(pkg_share, 'rviz', 'lidar3d_raw.rviz')
     rviz_proc = os.path.join(pkg_share, 'rviz', 'lidar3d_processed.rviz')
     rviz_voxel = os.path.join(pkg_share, 'rviz', 'lidar3d_voxel.rviz')
+    rviz_surface = os.path.join(pkg_share, 'rviz', 'lidar3d_surface_2d.rviz')
 
     # --- filter params ---
     filter_params = {'use_sim_time': use_sim_time_val}
@@ -163,7 +165,9 @@ def launch_setup(context, *args, **kwargs):
 
     # --- classify + transform → /obstacle_markers ---
     # resolve input topic: voxel > 2D
-    if use_voxel:
+    if use_surface:
+        adapter_input = '/obstacles/boxes_3d_surface'
+    elif use_voxel:
         adapter_input = '/obstacles/boxes_3d_voxel'
     else:
         adapter_input = '/obstacles/boxes'
@@ -175,7 +179,7 @@ def launch_setup(context, *args, **kwargs):
             'use_sim_time': use_sim_time_val,
             'source_frame': 'laser_link' if is_rosbag else 'baja_vehicle/base_link/lidar',
             'input_topic': adapter_input,
-            'passthrough': use_voxel,
+            'passthrough': use_voxel or use_surface,
         }],
         condition=seg_enabled,
     )
@@ -200,6 +204,14 @@ def launch_setup(context, *args, **kwargs):
         condition=lidar_percep_cond,
     )
 
+    # --- 2026-07-31: surface-fitting detector ---
+    surface_node = Node(
+        package='lidar3d_bringup', executable='surface_detector',
+        name='surface_detector', output='screen',
+        parameters=[{'use_sim_time': use_sim_time_val}],
+        condition=IfCondition(LaunchConfiguration('use_surface_detector')),
+    )
+
     # --- rviz2 ---
     rviz_raw_node = Node(
         package='rviz2', executable='rviz2', name='rviz2_raw',
@@ -218,6 +230,12 @@ def launch_setup(context, *args, **kwargs):
         arguments=['-d', rviz_voxel],
         parameters=[{'use_sim_time': use_sim_time_val}], output='screen',
         condition=voxel_cond,
+    )
+    rviz_surface_node = Node(
+        package='rviz2', executable='rviz2', name='rviz2_surface',
+        arguments=['-d', rviz_surface],
+        parameters=[{'use_sim_time': use_sim_time_val}], output='screen',
+        condition=IfCondition(LaunchConfiguration('use_surface_detector')),
     )
 
     # --- assembly ---
@@ -238,7 +256,8 @@ def launch_setup(context, *args, **kwargs):
     nodes.append(road_node)
     # 2026-07-30: voxel analyser (parallel to cluster_analyzer)
     nodes.append(voxel_node)
-    nodes.extend([rviz_raw_node, rviz_proc_node, rviz_voxel_node])
+    nodes.append(surface_node)
+    nodes.extend([rviz_raw_node, rviz_proc_node, rviz_voxel_node, rviz_surface_node])
 
     return nodes
 
@@ -283,6 +302,8 @@ def generate_launch_description():
             description='Replace truth_perception data with LiDAR-based road boundaries+obstacles'),
         DeclareLaunchArgument('use_voxel_analyzer', default_value='false',
             description='Use voxel-grid analyser instead of PCA-on-clusters'),
+        DeclareLaunchArgument('use_surface_detector', default_value='false',
+            description='Use terrain-surface fitting detector (recommended)'),
         DeclareLaunchArgument('use_rviz_raw', default_value='true',
             description='Show raw filtered point cloud rviz2 window'),
         DeclareLaunchArgument('use_rviz_proc', default_value='true',
