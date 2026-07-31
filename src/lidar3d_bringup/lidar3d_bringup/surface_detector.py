@@ -352,14 +352,32 @@ class SurfaceDetector(Node):
     def __init__(self):
         super().__init__('surface_detector')
 
-        for p, v in [('grid_dr_base', 0.10), ('grid_dr_per_m', 0.02),
-                      ('grid_dth_deg', 1.5), ('smooth_sigma', 1.0),
-                      ('residual_th_near', 0.15), ('residual_th_far', 0.40),
-                      ('mad_factor', 3.0), ('min_cluster_pts', 8),
-                      ('confidence_threshold', 0.35), ('pothole_depth_m', 0.08),
-                      ('track_dist_thr', 2.0), ('track_hist', 10), ('track_max_lost', 3),
-                      ('log_interval', 10)]:
-            self.declare_parameter(p, v)
+        # ==== 曲面模型 (Layer 1) ====
+        # 极坐标网格: dr = dr_base + dr_per_m * r  (近处细, 远处粗)
+        self.declare_parameter('grid_dr_base', 0.10)     # 径向基础分辨率(m)
+        self.declare_parameter('grid_dr_per_m', 0.02)    # 径向分辨率增长率(m/m)
+        self.declare_parameter('grid_dth_deg', 1.5)       # 角分辨率(度)
+        # 曲面平滑: ↑=曲面更平滑, 不跟随小突起, 矮障碍物残留差更大
+        self.declare_parameter('smooth_sigma', 1.0)       # 高斯平滑σ(格数). 0.5=紧贴地形, 2.0=强抹平
+
+        # ==== 残差分析 (Layer 2) ====
+        # 障碍物阈值: residual = z_实际 - S(地面). 降低→更敏感(矮障碍物可检出, 但噪点增多)
+        self.declare_parameter('residual_th_near', 0.15)  # 近处(5m)障碍物高度阈值(m)
+        self.declare_parameter('residual_th_far', 0.40)   # 远处(30m)障碍物高度阈值(m)
+        # 噪声抑制: residual > mad_factor × 局部MAD 才触发 (过滤草坪/碎石高方差)
+        self.declare_parameter('mad_factor', 3.0)         # MAD倍率. ↓=更敏感, ↑=更抗噪
+        # 聚类: 残差点2D连通域. ↓=小物体可检出但碎片增多
+        self.declare_parameter('min_cluster_pts', 8)       # 最小聚类点数
+
+        # ==== 置信度 & 发布 ====
+        self.declare_parameter('confidence_threshold', 0.35)  # ≥此值→高置信发布. ↓=少过滤, ↑=多过滤
+        self.declare_parameter('pothole_depth_m', 0.08)       # 坑洼深度阈值(m). ground局部Z异常
+
+        # ==== 时序追踪 ====
+        self.declare_parameter('track_dist_thr', 2.0)     # 跨帧匹配最大质心距离(m)
+        self.declare_parameter('track_hist', 10)           # 历史帧数(众数投票窗口)
+        self.declare_parameter('track_max_lost', 3)        # 丢帧上限(超过→删除track)
+        self.declare_parameter('log_interval', 10)          # 日志输出帧间隔
 
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.sub_g = self.create_subscription(PointCloud2, '/patchworkpp/ground', self._cb_ground, qos)
