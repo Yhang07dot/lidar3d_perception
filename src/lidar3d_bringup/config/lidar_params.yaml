@@ -8,31 +8,21 @@
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
-# 传感器硬件参数 (用于文档和参考，实际TF由launch文件设置)
+# 传感器硬件参数 (仅用于文档参考，不被ROS节点读取)
 # ------------------------------------------------------------------------------
-sensor:
-  # 传感器型号 (用于标识配置)
-  type: "lslidar_c16"              # lslidar_c16 | velodyne_vlp16 | gazebo_sim
-
-  # 安装位置 (相对base_link, 单位: 米)
-  # ⚠️ 实车部署前需要标定！当前值为仿真默认值
-  height: 1.5                      # 离地高度 (Z轴)
-  tf_x: 0.5                        # 前向偏移
-  tf_y: 0.0                        # 横向偏移
-  tf_z: 1.5                        # 竖直偏移
-
-  # Ring字段配置 (用于垂直角度识别)
-  # LSLidar C16应该有原生ring字段，如果字段名不是'ring'请修改
-  # TODO: 拿到传感器后确认消息格式，修改此字段名
-  ring_field_name: "ring"          # 点云消息中的ring字段名
-  use_native_ring: true            # true=优先用原生ring, false=强制计算
-
-  # 传感器规格 (不常改)
-  num_rings: 16                    # 线束数
-  vertical_fov_min: -15.0          # 垂直FOV下限 (度)
-  vertical_fov_max: 15.0           # 垂直FOV上限 (度)
-  horizontal_resolution: 0.2       # 水平角分辨率 (度)
-  frame_rate: 10                   # 帧率 (Hz)
+# sensor:
+#   type: "lslidar_c16"
+#   height: 1.5  (实车标定后修改)
+#   tf_x: 0.5
+#   tf_y: 0.0
+#   tf_z: 1.5
+#   ring_field_name: "ring"  (TODO: 拿到LSLidar C16后确认)
+#   use_native_ring: true
+#   num_rings: 16
+#   vertical_fov_min: -15.0
+#   vertical_fov_max: 15.0
+#   horizontal_resolution: 0.2
+#   frame_rate: 10
 
 
 # ------------------------------------------------------------------------------
@@ -139,6 +129,28 @@ road_analyzer:
 
     # 平滑
     smoothing_window: 5              # 移动平均窗口大小
+
+
+# ------------------------------------------------------------------------------
+# 路沿边界检测器 (boundary_detector节点) — 2026-08-03新增
+# ------------------------------------------------------------------------------
+boundary_detector:
+  ros__parameters:
+    # 极坐标分bin
+    angular_resolution: 1.0          # 角度分辨率 (度)
+
+    # 连续段判定
+    gap_threshold: 1.2               # 间隙阈值 (m)
+
+    # 路沿特征
+    height_diff_threshold: 0.12      # 高度差阈值 (m)
+
+    # 平滑
+    smoothing_window: 7              # 移动平均窗口大小
+
+    # 过滤
+    min_boundary_points: 10          # 最少边界点数
+    max_range: 20.0                  # 最大检测距离 (m)
 
 
 # ==============================================================================

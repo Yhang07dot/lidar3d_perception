@@ -39,31 +39,40 @@ from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA, Header
 
 # scipy optional — used for Gaussian smoothing of the surface grid
-try:
-    from scipy.ndimage import gaussian_filter
-    HAS_SCIPY = True
-except Exception:
-    HAS_SCIPY = False  # NumPy 2.x / SciPy incompatibility → fallback box blur
+# Disabled due to NumPy 2.x incompatibility with system SciPy
+# try:
+#     from scipy.ndimage import gaussian_filter
+#     HAS_SCIPY = True
+# except Exception:
+#     HAS_SCIPY = False  # NumPy 2.x / SciPy incompatibility → fallback box blur
+HAS_SCIPY = False  # Force box blur fallback
 
 DTYPE_MAP = {
     1: np.int8, 2: np.uint8, 3: np.int16, 4: np.uint16,
     5: np.int32, 6: np.uint32, 7: np.float32, 8: np.float64,
 }
 
-# --- type system ---
-TYPE_OBSTACLE, TYPE_POLE, TYPE_BUMP, TYPE_SLOPE = 0, 1, 2, 3
-TYPE_ROUGH, TYPE_POTHOLE, TYPE_WAVE, TYPE_BOUNDARY = 4, 5, 6, 7
-TYPE_LABELS = {0: 'obstacle', 1: 'pole', 2: 'bump', 3: 'slope',
-               4: 'rough', 5: 'pothole', 6: 'wave', 7: 'boundary'}
+# --- type system (simplified to 5 types) ---
+TYPE_OBSTACLE = 0          # 不可通过障碍物
+TYPE_PASSABLE_LOW = 1      # 可通过（坡、细杆、减速带、粗糙地形）
+TYPE_PASSABLE_HIGH = 2     # 需减速通过（波浪路、坑洼）
+TYPE_BOUNDARY = 3          # 路沿边界
+TYPE_UNKNOWN = 4           # 未知/低置信度
+
+TYPE_LABELS = {
+    0: 'obstacle',
+    1: 'passable_low',
+    2: 'passable_high',
+    3: 'boundary',
+    4: 'unknown'
+}
+
 TYPE_COLORS = {
-    0: (1.0, 0.5, 0.0, 0.6),   # orange
-    1: (1.0, 0.0, 0.0, 0.7),   # red
-    2: (1.0, 1.0, 0.0, 0.5),   # yellow
-    3: (0.0, 0.5, 0.0, 0.45),  # deep green
-    4: (1.0, 0.8, 0.0, 0.5),   # amber
-    5: (0.5, 0.0, 1.0, 0.6),   # purple
-    6: (0.0, 0.7, 1.0, 0.5),   # cyan
-    7: (1.0, 0.6, 0.8, 0.6),   # pink
+    0: (1.0, 0.0, 0.0, 0.7),   # red - 不可通过
+    1: (0.0, 0.8, 0.0, 0.5),   # green - 可通过
+    2: (1.0, 0.9, 0.0, 0.6),   # yellow - 减速通过
+    3: (0.0, 0.5, 1.0, 0.6),   # blue - 路沿
+    4: (0.7, 0.7, 0.7, 0.4),   # gray - 未知
 }
 
 
@@ -321,25 +330,38 @@ def _classify_surface(pts: np.ndarray, S_z: np.ndarray, ground_z_mean: float) ->
                (xy_max[1] - xy[:, 1] < boundary_thickness))
     edge_ratio = float(on_edge.sum() / max(1, n))
 
-    # ---- classification (distance-adaptive) ----
-    if W > 6.0:
-        return TYPE_SLOPE, 'slope_big', c, dims, verticality, edge_ratio
-    if verticality > 0.85 and H > 0.3 and W_min < pole_width_max:
-        return TYPE_POLE, f'pole_H{H:.1f}m_d{dist:.0f}m', c, dims, verticality, edge_ratio
-    if H < 0.3 and curvature > 0.02:
-        return TYPE_BUMP, f'bump_H{H:.2f}m', c, dims, verticality, edge_ratio
-    if slope_deg < 15.0 and linearity < 0.5 and H < 2.0:
-        return TYPE_SLOPE, f'slope_{slope_deg:.0f}deg', c, dims, verticality, edge_ratio
-    if rel_elev > 0.2 and H > 0.3:
-        return TYPE_OBSTACLE, f'obs_elev{rel_elev:.2f}m', c, dims, verticality, edge_ratio
-    if n > 30 and curvature < 0.01:
-        return TYPE_WAVE, f'wave_H{H:.2f}m', c, dims, verticality, edge_ratio
-    if verticality > 0.6 and H > 0.4:
-        return TYPE_OBSTACLE, f'obs_H{H:.1f}m_d{dist:.0f}m', c, dims, verticality, edge_ratio
-    # Far small clusters with few points → likely noise, classify as rough
+    # ---- classification (simplified to 5 types) ----
+
+    # 1. 路沿检测（长条形 + 边缘特征）
+    # 特征：线性度高、长条形、边界点多、高度适中
+    if linearity > 0.6 and W > 3.0 and edge_ratio > 0.6 and 0.1 < H < 0.8:
+        return TYPE_BOUNDARY, f'boundary_L{W:.1f}m_H{H:.2f}m', c, dims, verticality, edge_ratio
+
+    # 2. 不可通过障碍物（高、悬空、垂直）
+    if H > 0.5 and (rel_elev > 0.25 or verticality > 0.7):
+        return TYPE_OBSTACLE, f'obstacle_H{H:.1f}m_d{dist:.0f}m', c, dims, verticality, edge_ratio
+
+    # 3. 需减速通过（波浪路、坑洼特征）
+    if n > 30 and curvature < 0.01 and H < 1.0:  # 波浪路：点多、平缓
+        return TYPE_PASSABLE_HIGH, f'wave_L{W:.1f}m', c, dims, verticality, edge_ratio
+
+    # 4. 可通过：坡面（宽大、缓坡）
+    if W > 4.0 or (slope_deg < 20.0 and H < 2.0):
+        return TYPE_PASSABLE_LOW, f'passable_slope{slope_deg:.0f}deg', c, dims, verticality, edge_ratio
+
+    # 5. 可通过：细杆、减速带、矮障碍物（H < 0.5m）
+    if H < 0.5:
+        if verticality > 0.7 and W_min < pole_width_max:
+            return TYPE_PASSABLE_LOW, f'passable_pole_H{H:.2f}m', c, dims, verticality, edge_ratio
+        else:
+            return TYPE_PASSABLE_LOW, f'passable_bump_H{H:.2f}m', c, dims, verticality, edge_ratio
+
+    # 6. 远处稀疏小簇 → 未知
     if dist > 15.0 and n < min_pts_small:
-        return TYPE_ROUGH, f'rough_far_sparse_d{dist:.0f}m', c, dims, verticality, edge_ratio
-    return TYPE_ROUGH, f'rough_H{H:.2f}m', c, dims, verticality, edge_ratio
+        return TYPE_UNKNOWN, f'unknown_sparse_d{dist:.0f}m', c, dims, verticality, edge_ratio
+
+    # 7. 默认：可通过的粗糙地形
+    return TYPE_PASSABLE_LOW, f'passable_rough_H{H:.2f}m', c, dims, verticality, edge_ratio
 
 
 def _confidence_surface(n_pts: int, verticality: float, edge_ratio: float,
@@ -495,7 +517,7 @@ class SurfaceDetector(Node):
                            ns='pothole', id=i, type=Marker.SPHERE, action=Marker.ADD)
                 m.pose.position.x, m.pose.position.y, m.pose.position.z = cx, cy, -d / 2
                 m.scale.x = m.scale.y = m.scale.z = 0.3
-                m.color = _mk_color(TYPE_POTHOLE); m.lifetime.nanosec = 500_000_000
+                m.color = _mk_color(TYPE_PASSABLE_HIGH); m.lifetime.nanosec = 500_000_000
                 m.text = f'pothole_{d*100:.0f}cm'; ma.markers.append(m)
             self.pub_pot.publish(ma)
 
