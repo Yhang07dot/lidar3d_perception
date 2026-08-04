@@ -63,7 +63,7 @@ surface_detector:
     grid_dth_deg: 1.5                # 角度分辨率 (度)
 
     # 曲面平滑参数
-    smooth_sigma: 1.0                # 高斯平滑σ (格数)
+    smooth_sigma: 1.2                # 高斯平滑σ (格数)
                                      # ↑ = 曲面更平滑，小突起残差更大
                                      # 推荐范围: 0.5-2.0
 
@@ -82,7 +82,7 @@ surface_detector:
     # ==== 时序追踪 ====
     track_dist_thr: 2.0              # 跨帧匹配最大距离 (m)
     track_hist: 10                   # 历史帧数
-    track_max_lost: 3                # 丢帧上限
+    track_max_lost: 5                # 丢帧上限
 
     # ==== 日志输出 ====
     log_interval: 10                 # 日志输出帧间隔
@@ -113,7 +113,7 @@ voxel_analyzer:
 obstacle_adapter:
   ros__parameters:
     # Marker生命周期
-    marker_lifetime_ms: 300          # 标记存活时间 (毫秒)
+    marker_lifetime_ms: 400          # 标记存活时间 (毫秒)
 
 
 # ------------------------------------------------------------------------------

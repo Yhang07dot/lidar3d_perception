@@ -27,6 +27,16 @@ from geometry_msgs.msg import TransformStamped
 from tf2_ros import Buffer, TransformListener
 
 
+# 颜色映射 - 与surface_detector保持一致 (2026-08-03)
+TYPE_COLORS = {
+    'obstacle': (1.0, 0.0, 0.0, 0.7),      # 红色 - 不可通过
+    'passable_low': (0.0, 0.8, 0.0, 0.5),  # 绿色 - 可通过
+    'passable_high': (1.0, 0.9, 0.0, 0.6), # 黄色 - 减速通过
+    'boundary': (0.0, 0.5, 1.0, 0.6),      # 蓝色 - 路沿
+    'unknown': (0.7, 0.7, 0.7, 0.4),       # 灰色 - 未知
+}
+
+
 def classify_obstacle(scale):
     """
     Classify obstacle by bounding box shape.
@@ -156,10 +166,13 @@ class ObstacleAdapter(Node):
             m.pose.position.z = base_z
             m.pose.orientation.w = 1.0
             m.scale = marker.scale
-            m.color.r = 1.0 if type_id == 1 else 0.0    # red for poles
-            m.color.g = 0.0 if type_id == 1 else 1.0    # green for others
-            m.color.b = 0.0
-            m.color.a = 0.6
+
+            # 使用与surface_detector一致的颜色
+            r, g, b, a = TYPE_COLORS.get(label, TYPE_COLORS['obstacle'])
+            m.color.r = r
+            m.color.g = g
+            m.color.b = b
+            m.color.a = a
             m.lifetime.nanosec = 200_000_000  # 200ms
             out.markers.append(m)
 

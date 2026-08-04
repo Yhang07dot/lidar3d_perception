@@ -528,6 +528,9 @@ class SurfaceDetector(Node):
         xyz = _pc2_to_xyz(msg)
         n = len(xyz)
         if n < 20:
+            # 发布空MarkerArray清空旧marker
+            self.pub_boxes.publish(MarkerArray())
+            self.pub_low.publish(MarkerArray())
             return
 
         # residual analysis
@@ -579,7 +582,8 @@ class SurfaceDetector(Node):
             box.pose.position.x, box.pose.position.y, box.pose.position.z = float(cent[0]), float(cent[1]), float(cent[2])
             box.pose.orientation.w = 1.0
             box.scale.x, box.scale.y, box.scale.z = float(dims[0]), float(dims[1]), float(dims[2])
-            box.color = _mk_color(st, 0.25 if not hi else None); box.lifetime.nanosec = 300_000_000
+            box.color = _mk_color(st, 0.25 if not hi else None)
+            box.text = f'{sl} c={conf:.2f}'; box.lifetime.nanosec = 300_000_000
             (bh if hi else bl).markers.append(box)
 
         self.pub_boxes.publish(bh)
