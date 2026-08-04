@@ -49,8 +49,13 @@ def _extract_boundaries(
     gap_threshold: float = 0.8,
     min_range: float = 0.5,
     max_range: float = 30.0,
+    height_diff_threshold: float = 0.0,
 ) -> tuple:
     """Extract left and right boundary points from ground cloud via polar gap detection.
+
+    height_diff_threshold > 0 additionally requires a Z jump at the segment end
+    (a real kerb/berm steps up or down), which suppresses candidates that are
+    merely the sparse edge of the ground cloud. 0.0 disables the check.
 
     Returns (left_pts, right_pts) as (N,2) arrays in XY (sensor frame).
     """
@@ -58,13 +63,13 @@ def _extract_boundaries(
     if n < 10:
         return np.zeros((0, 2)), np.zeros((0, 2))
 
-    x, y = xyz[:, 0], xyz[:, 1]
+    x, y, z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
     dist = np.sqrt(x**2 + y**2)
     angle = np.arctan2(y, x)  # [-pi, pi]
 
     # filter range
     mask = (dist >= min_range) & (dist <= max_range)
-    x, y, dist, angle = x[mask], y[mask], dist[mask], angle[mask]
+    x, y, z, dist, angle = x[mask], y[mask], z[mask], dist[mask], angle[mask]
 
     # bin by angle
     bin_edges = np.linspace(-math.pi, math.pi, angular_bins + 1)
@@ -84,6 +89,7 @@ def _extract_boundaries(
         d_sorted = dist[mask_bin][idx_sorted]
         x_sorted = x[mask_bin][idx_sorted]
         y_sorted = y[mask_bin][idx_sorted]
+        z_sorted = z[mask_bin][idx_sorted]
 
         # find largest continuous segment (gap > threshold between consecutive points)
         gaps = np.diff(d_sorted)
@@ -97,6 +103,12 @@ def _extract_boundaries(
             edge_idx = break_points[0]
 
         if edge_idx >= 0:
+            # 高度突变判据: 真实路沿在段终点处Z跳变，仅点云稀疏的边缘不跳变
+            if height_diff_threshold > 0.0 and edge_idx >= 2:
+                z_jump = abs(float(z_sorted[edge_idx] - z_sorted[edge_idx - 2]))
+                if z_jump < height_diff_threshold:
+                    continue
+
             bx, by = x_sorted[edge_idx], y_sorted[edge_idx]
             if by > 0:
                 left_pts.append([bx, by])
@@ -233,6 +245,10 @@ class RoadAnalyzer(Node):
         self.declare_parameter('max_range', 30.0)
         self.declare_parameter('smooth_window', 5)
         self.declare_parameter('log_interval', 30)
+        # 高度突变判据 (2026-08-04): 路沿(土坎/路肩)在段终点处有明显Z跳变。
+        # >0 时只接受终点前后Z差超过此值的候选，抑制"地面点云自然稀疏边缘"误判。
+        # 0.0 = 关闭(保持原有行为，所有段终点都算路沿候选)
+        self.declare_parameter('height_diff_threshold', 0.0)
 
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
         latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
@@ -270,8 +286,9 @@ class RoadAnalyzer(Node):
         max_r = self.get_parameter('max_range').value
         win = self.get_parameter('smooth_window').value
         log_int = self.get_parameter('log_interval').value
+        h_diff = self.get_parameter('height_diff_threshold').value
 
-        left, right = _extract_boundaries(xyz, bins, gap, min_r, max_r)
+        left, right = _extract_boundaries(xyz, bins, gap, min_r, max_r, h_diff)
 
         # smooth
         left_sm = _smooth_boundary(left, win)

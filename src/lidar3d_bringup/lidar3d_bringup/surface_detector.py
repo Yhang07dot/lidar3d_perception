@@ -99,18 +99,28 @@ def _pc2_to_xyz(msg: PointCloud2) -> np.ndarray:
 
 def _build_polar_grid(xyz: np.ndarray, r_min: float = 0.5, r_max: float = 35.0,
                       dr_base: float = 0.10, dr_per_m: float = 0.02,
-                      dth_deg: float = 1.5) -> dict:
+                      dth_deg: float = 1.5, outlier_factor: float = 2.0) -> dict:
     """Bin ground points into a polar grid (r, theta) in vehicle frame.
 
     Grid spacing grows with range: dr = dr_base + dr_per_m * r
     Returns: {'z_median': 2D array, 'z_mad': 2D array, 'count': 2D array,
-              'r_edges', 'th_edges', 'r_centers', 'th_centers', 'n_r', 'n_th'}
+              'r_edges', 'th_edges', 'r_centers', 'th_centers', 'n_r', 'n_th',
+              'outlier_indices': 1D array of indices into input xyz that are
+              significantly above the local surface (likely mis-classified obstacles)}
+
+    Outlier handling (2026-08-03, 方案A):
+      Patchwork++ may mis-assign obstacle points to /patchworkpp/ground on slopes.
+      For each bin we compute median/MAD, flag points above median + k*MAD as
+      outliers, and re-compute the surface height from the CLEAN points only.
+      This keeps the surface from following the obstacle while capturing the
+      outlier points for downstream residual detection.
     """
     r = np.sqrt(xyz[:, 0]**2 + xyz[:, 1]**2)
     th = np.arctan2(xyz[:, 1], xyz[:, 0])
     z = xyz[:, 2]
 
     mask = (r >= r_min) & (r <= r_max)
+    keep_idx = np.where(mask)[0]      # indices into original xyz
     r, th, z = r[mask], th[mask], z[mask]
     if len(r) < 10:
         return None
@@ -133,6 +143,7 @@ def _build_polar_grid(xyz: np.ndarray, r_min: float = 0.5, r_max: float = 35.0,
     z_median = np.full((n_r, n_th), np.nan)
     z_mad = np.full((n_r, n_th), np.nan)
     count = np.zeros((n_r, n_th), dtype=np.int32)
+    outlier_flags = np.zeros(len(z), dtype=bool)   # flags in filtered index space
 
     # Vectorized grid statistics — 10x faster than double loop
     # Group points by their (ir, ith) bin and compute median/MAD per bin
@@ -146,18 +157,37 @@ def _build_polar_grid(xyz: np.ndarray, r_min: float = 0.5, r_max: float = 35.0,
             ri = flat_idx // n_th
             ti = flat_idx % n_th
             zs = z[mask]
-            med = np.median(zs)
-            z_median[ri, ti] = med
-            z_mad[ri, ti] = 1.4826 * np.median(np.abs(zs - med))
+            idxs = np.where(mask)[0]
+
+            # 用最低30%的点估计地面高度 (2026-08-03 方案A增强)
+            # 地面是连续的最低表面：即使障碍物点占单个bin的70%，
+            # 最低的1/3仍然是真实地面，median不会被障碍物抬高。
+            k_ground = max(3, len(zs) // 3)
+            part_idx = np.argpartition(zs, k_ground - 1)[:k_ground]
+            ground_cand = zs[part_idx]
+            ground_h = float(np.median(ground_cand))
+            ground_mad = float(1.4826 * np.median(np.abs(ground_cand - ground_h)))
+
+            # 离群阈值：k×MAD 但有下限，避免地面微小起伏被过度捕获
+            thresh = max(outlier_factor * ground_mad, 0.15)
+            out = zs > ground_h + thresh
+            if out.any():
+                outlier_flags[idxs[out]] = True
+
+            z_median[ri, ti] = ground_h   # 曲面高度 = 地面高度(不被障碍物抬高)
+            z_mad[ri, ti] = ground_mad
             count[ri, ti] = n_pts
 
     r_centers = 0.5 * (r_edges[:-1] + r_edges[1:])
     th_centers = 0.5 * (th_edges[:-1] + th_edges[1:])
 
+    # map outlier flags back to indices in the ORIGINAL xyz array
+    outlier_indices = keep_idx[outlier_flags]
+
     return {'z_median': z_median, 'z_mad': z_mad, 'count': count,
             'r_edges': r_edges, 'th_edges': th_edges,
             'r_centers': r_centers, 'th_centers': th_centers,
-            'n_r': n_r, 'n_th': n_th}
+            'n_r': n_r, 'n_th': n_th, 'outlier_indices': outlier_indices}
 
 
 def _fill_and_smooth(grid: dict, sigma: float = 1.0) -> np.ndarray:
@@ -199,8 +229,14 @@ def _fill_and_smooth(grid: dict, sigma: float = 1.0) -> np.ndarray:
     return z
 
 
-def _sample_surface(S: np.ndarray, grid: dict, x: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """Bilinear sample the surface grid at (x, y) positions. Returns expected z."""
+def _sample_surface(S: np.ndarray, grid: dict, x: np.ndarray, y: np.ndarray) -> tuple:
+    """Sample the surface grid at (x, y) positions.
+
+    Returns (expected_z, count):
+      expected_z — surface height at each (x,y) (nearest-neighbour grid lookup)
+      count      — number of real ground points in each sampled bin. count<3
+                   means the surface there is interpolation-filled (unreliable).
+    """
     r = np.sqrt(x**2 + y**2)
     th = np.arctan2(y, x)
     r_edges = grid['r_edges']
@@ -210,7 +246,7 @@ def _sample_surface(S: np.ndarray, grid: dict, x: np.ndarray, y: np.ndarray) -> 
     ir = np.clip(np.searchsorted(r_edges, r) - 1, 0, n_r - 1)
     ith = np.clip(np.searchsorted(th_edges, th) - 1, 0, n_th - 1)
 
-    return S[ir, ith]
+    return S[ir, ith], grid['count'][ir, ith]
 
 
 def _adaptive_threshold(r: np.ndarray, th_near: float = 0.15,
@@ -279,7 +315,9 @@ def _classify_surface(pts: np.ndarray, S_z: np.ndarray, ground_z_mean: float) ->
     n = len(pts)
     mn, mx = pts.min(axis=0), pts.max(axis=0)
     dims = mx - mn
-    c = (mn + mx) / 2.0
+    # 质心用点云均值 (2026-08-03): 16线只命中物体部分表面时，
+    # 包围盒中心(mn+mx)/2偏向命中点集的几何中心，均值更接近物体真实中心。
+    c = pts.mean(axis=0)
     H = float(dims[2])
 
     # Distance-adaptive thresholds — far objects have sparser points
@@ -332,36 +370,47 @@ def _classify_surface(pts: np.ndarray, S_z: np.ndarray, ground_z_mean: float) ->
 
     # ---- classification (simplified to 5 types) ----
 
+    # 物体高度估计 (2026-08-03):
+    # LiDAR只命中顶面时包围盒高度H偏小(≈顶面厚度)，此时离地高度rel_elev准确；
+    # 命中完整侧面时H准确。取两者较大值兼顾两种情形。
+    height_est = max(rel_elev, H)
+
     # 1. 路沿检测（长条形 + 边缘特征）
     # 特征：线性度高、长条形、边界点多、高度适中
     if linearity > 0.6 and W > 3.0 and edge_ratio > 0.6 and 0.1 < H < 0.8:
         return TYPE_BOUNDARY, f'boundary_L{W:.1f}m_H{H:.2f}m', c, dims, verticality, edge_ratio
 
-    # 2. 不可通过障碍物（高、悬空、垂直）
-    if H > 0.5 and (rel_elev > 0.25 or verticality > 0.7):
-        return TYPE_OBSTACLE, f'obstacle_H{H:.1f}m_d{dist:.0f}m', c, dims, verticality, edge_ratio
+    # 2. 宽大坡面 → 可通过（提前判定，避免高坡被误判为障碍物）
+    if W > 4.0:
+        return TYPE_PASSABLE_LOW, f'passable_slope_big_W{W:.1f}m', c, dims, verticality, edge_ratio
 
-    # 3. 需减速通过（波浪路、坑洼特征）
+    # 3. 不可通过障碍物（高 + 紧凑 + 悬空/垂直）——用height_est估计物体高度
+    # compactness约束(W<2.5)区分"有限尺寸凸起(箱体/电线杆)"和"连续地形(缓坡/起伏路)"：
+    # 近场无地面参考时，地形整体抬升会让rel_elev误偏大，但缓坡W大不满足此约束。
+    if height_est > 0.5 and W < 2.5 and (rel_elev > 0.25 or verticality > 0.7):
+        return TYPE_OBSTACLE, f'obstacle_H{height_est:.1f}m_d{dist:.0f}m', c, dims, verticality, edge_ratio
+
+    # 4. 需减速通过（波浪路、坑洼特征）
     if n > 30 and curvature < 0.01 and H < 1.0:  # 波浪路：点多、平缓
         return TYPE_PASSABLE_HIGH, f'wave_L{W:.1f}m', c, dims, verticality, edge_ratio
 
-    # 4. 可通过：坡面（宽大、缓坡）
-    if W > 4.0 or (slope_deg < 20.0 and H < 2.0):
+    # 5. 可通过：缓坡
+    if slope_deg < 20.0 and height_est < 2.0:
         return TYPE_PASSABLE_LOW, f'passable_slope{slope_deg:.0f}deg', c, dims, verticality, edge_ratio
 
-    # 5. 可通过：细杆、减速带、矮障碍物（H < 0.5m）
-    if H < 0.5:
+    # 6. 可通过：细杆、减速带、矮障碍物（height_est < 0.5m）
+    if height_est < 0.5:
         if verticality > 0.7 and W_min < pole_width_max:
-            return TYPE_PASSABLE_LOW, f'passable_pole_H{H:.2f}m', c, dims, verticality, edge_ratio
+            return TYPE_PASSABLE_LOW, f'passable_pole_H{height_est:.2f}m', c, dims, verticality, edge_ratio
         else:
-            return TYPE_PASSABLE_LOW, f'passable_bump_H{H:.2f}m', c, dims, verticality, edge_ratio
+            return TYPE_PASSABLE_LOW, f'passable_bump_H{height_est:.2f}m', c, dims, verticality, edge_ratio
 
-    # 6. 远处稀疏小簇 → 未知
+    # 7. 远处稀疏小簇 → 未知
     if dist > 15.0 and n < min_pts_small:
         return TYPE_UNKNOWN, f'unknown_sparse_d{dist:.0f}m', c, dims, verticality, edge_ratio
 
-    # 7. 默认：可通过的粗糙地形
-    return TYPE_PASSABLE_LOW, f'passable_rough_H{H:.2f}m', c, dims, verticality, edge_ratio
+    # 8. 默认：可通过的粗糙地形
+    return TYPE_PASSABLE_LOW, f'passable_rough_H{height_est:.2f}m', c, dims, verticality, edge_ratio
 
 
 def _confidence_surface(n_pts: int, verticality: float, edge_ratio: float,
@@ -427,6 +476,18 @@ class SurfaceDetector(Node):
         # 聚类: 残差点2D连通域. ↓=小物体可检出但碎片增多
         self.declare_parameter('min_cluster_pts', 8)       # 最小聚类点数
 
+        # ==== Ground离群点过滤 (方案A, 2026-08-03) ====
+        # Patchwork++可能把斜面上的障碍物误分到ground。此参数控制
+        # 曲面构建时剔除"高于median + k×MAD"的ground点，捕获为疑似障碍物。
+        # ↓=捕获更多疑似障碍物(更敏感), ↑=更宽松(抑制误检)
+        self.declare_parameter('ground_outlier_factor', 2.0)
+
+        # ==== 近场曲面NaN修复 (2026-08-03) ====
+        # Patchwork++盲区(min_range=1.0) + 16线近场打不到地面 → 曲面NaN。
+        # 此范围内用全局地面参考填充NaN，使近场障碍物能触发检测。
+        # ↑=扩大修复范围, ↓=缩小(近场可能漏检)
+        self.declare_parameter('nearfield_range', 6.0)
+
         # ==== 置信度 & 发布 ====
         self.declare_parameter('confidence_threshold', 0.35)  # ≥此值→高置信发布. ↓=少过滤, ↑=多过滤
         self.declare_parameter('pothole_depth_m', 0.08)       # 坑洼深度阈值(m). ground局部Z异常
@@ -448,6 +509,7 @@ class SurfaceDetector(Node):
         self._surface = None
         self._grid = None
         self._ground_z = None
+        self._ground_outliers = np.empty((0, 3))  # 方案A: ground中被捕获的疑似障碍物点
         self._tracks = {}
         self._tid = 1
         self._fc = 0
@@ -495,18 +557,29 @@ class SurfaceDetector(Node):
         n = len(g)
         if n < 20:
             return
-        self._ground_z = float(g[:, 2].mean())
 
-        # build polar surface grid
+        # build polar surface grid (with outlier filtering, 方案A)
         grid = _build_polar_grid(g,
                                  dr_base=self.get_parameter('grid_dr_base').value,
                                  dr_per_m=self.get_parameter('grid_dr_per_m').value,
-                                 dth_deg=self.get_parameter('grid_dth_deg').value)
+                                 dth_deg=self.get_parameter('grid_dth_deg').value,
+                                 outlier_factor=self.get_parameter('ground_outlier_factor').value)
         if grid is None:
             return
         S = _fill_and_smooth(grid, sigma=self.get_parameter('smooth_sigma').value)
         self._surface = S
         self._grid = grid
+
+        # capture points mis-assigned to ground but significantly above surface
+        out_idx = grid['outlier_indices']
+        self._ground_outliers = g[out_idx] if len(out_idx) > 0 else np.empty((0, 3))
+
+        # ground reference height from CLEAN surface (not pulled up by obstacles)
+        valid = ~np.isnan(S)
+        if valid.any():
+            self._ground_z = float(np.nanmedian(S[valid]))
+        else:
+            self._ground_z = float(g[:, 2].mean())
 
         # pothole detection
         pots = _detect_potholes(g, depth_thr=self.get_parameter('pothole_depth_m').value)
@@ -526,17 +599,36 @@ class SurfaceDetector(Node):
             return
         self._fc += 1
         xyz = _pc2_to_xyz(msg)
+
+        # 方案A: 合并被误分到ground的疑似障碍物点
+        # Patchwork++可能把斜面上的障碍物点分到ground，这些点
+        # 已在_cb_ground中被捕获到self._ground_outliers，这里一起参与残差检测
+        if len(self._ground_outliers) > 0:
+            xyz = np.concatenate([xyz, self._ground_outliers], axis=0)
+
         n = len(xyz)
         if n < 20:
-            # 发布空MarkerArray清空旧marker
-            self.pub_boxes.publish(MarkerArray())
-            self.pub_low.publish(MarkerArray())
+            # 不发布空MarkerArray: obstacle_adapter 的缓存负责维持输出连续性
+            # (frenet_planner 是状态覆盖式，空帧会让它瞬时丢失全部障碍物)
             return
 
         # residual analysis
-        S_z = _sample_surface(self._surface, self._grid, xyz[:, 0], xyz[:, 1])
-        residuals = xyz[:, 2] - S_z
+        S_z, cnt = _sample_surface(self._surface, self._grid, xyz[:, 0], xyz[:, 1])
         r = np.sqrt(xyz[:, 0]**2 + xyz[:, 1]**2)
+
+        # 近场曲面不可靠修复 (2026-08-03):
+        # Patchwork++在min_range=1.0内无条件分到nonground，且16线LiDAR近场
+        # (<5.6m)打不到地面 → 近场bin的count≈0，曲面是_fill_and_smooth插值
+        # 填充的、不可靠。用全局地面参考替换不可靠bin的曲面值：
+        #   地面点(z≈ref)残差≈0被排除(净化聚类)，
+        #   高大障碍物(z明显高)能触发检测。
+        nearfield_range = self.get_parameter('nearfield_range').value
+        unreliable = (cnt < 3) & (r < nearfield_range)
+        if unreliable.any():
+            ref = self._ground_z if self._ground_z is not None else -1.5
+            S_z[unreliable] = ref
+
+        residuals = xyz[:, 2] - S_z
         th = _adaptive_threshold(r,
                                  self.get_parameter('residual_th_near').value,
                                  self.get_parameter('residual_th_far').value)
@@ -554,7 +646,7 @@ class SurfaceDetector(Node):
         oi = []
 
         for pts_c in clusters:
-            c_z = _sample_surface(self._surface, self._grid, pts_c[:, 0], pts_c[:, 1])
+            c_z, _ = _sample_surface(self._surface, self._grid, pts_c[:, 0], pts_c[:, 1])
             tid, label, cent, dims, vert, edge = _classify_surface(pts_c, c_z, self._ground_z or 0.0)
             oi.append((tid, label, cent, dims, len(pts_c), vert, edge))
 
@@ -590,7 +682,8 @@ class SurfaceDetector(Node):
         if bl.markers:
             self.pub_low.publish(bl)
         if ll and self._fc % li == 0:
-            self.get_logger().info(f'F{self._fc}: ' + ' | '.join(ll))
+            self.get_logger().info(f'F{self._fc}: ' + ' | '.join(ll) +
+                                   f' | near_unrel={unreliable.sum()}')
 
 
 def main(args=None):

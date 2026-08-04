@@ -21,7 +21,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 
@@ -211,15 +211,32 @@ def launch_setup(context, *args, **kwargs):
         package='lidar3d_bringup', executable='road_analyzer',
         name='road_analyzer', output='screen',
         parameters=[params_file, {'use_sim_time': use_sim_time_val}],
+        # 2026-08-04: use_lidar_perception 时把路沿输出接到规控订阅的话题
+        # (frenet_planner 订阅 /road_boundary_markers, ns=road_left/road_right)
+        remappings=[('/lidar/road_boundary_markers', '/road_boundary_markers')],
         condition=lidar_percep_cond,
     )
 
-    # --- 2026-07-31: surface-fitting detector ---
+    # --- 2026-07-31: surface-fitting detector (Python 版) ---
     surface_node = Node(
         package='lidar3d_bringup', executable='surface_detector',
         name='surface_detector', output='screen',
         parameters=[params_file, {'use_sim_time': use_sim_time_val}],
-        condition=IfCondition(LaunchConfiguration('use_surface_detector')),
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('use_surface_detector'),
+            "'.lower() == 'true' and '", LaunchConfiguration('use_cpp_detector'),
+            "'.lower() != 'true'"])),
+    )
+
+    # --- 2026-08-04: surface-fitting detector (C++ 版, 同参数同话题) ---
+    surface_cpp_node = Node(
+        package='lidar3d_perception_cpp', executable='surface_detector_node',
+        name='surface_detector', output='screen',
+        parameters=[params_file, {'use_sim_time': use_sim_time_val}],
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('use_surface_detector'),
+            "'.lower() == 'true' and '", LaunchConfiguration('use_cpp_detector'),
+            "'.lower() == 'true'"])),
     )
 
     # --- 2026-08-03: boundary detector ---
@@ -275,6 +292,7 @@ def launch_setup(context, *args, **kwargs):
     # 2026-07-30: voxel analyser (parallel to cluster_analyzer)
     nodes.append(voxel_node)
     nodes.append(surface_node)
+    nodes.append(surface_cpp_node)
     nodes.append(boundary_node)
     nodes.extend([rviz_raw_node, rviz_proc_node, rviz_voxel_node, rviz_surface_node])
 
@@ -327,6 +345,9 @@ def generate_launch_description():
             description='Use voxel-grid analyser instead of PCA-on-clusters'),
         DeclareLaunchArgument('use_surface_detector', default_value='false',
             description='Use terrain-surface fitting detector (recommended)'),
+        DeclareLaunchArgument('use_cpp_detector', default_value='false',
+            description='Run the C++ surface detector instead of the Python one '
+                        '(same topics/params; requires use_surface_detector:=true)'),
         DeclareLaunchArgument('use_boundary_detector', default_value='false',
             description='Use road boundary detector (extract left/right boundaries)'),
         DeclareLaunchArgument('use_rviz_raw', default_value='true',

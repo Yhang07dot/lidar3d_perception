@@ -80,6 +80,22 @@ class ObstacleAdapter(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
+        # ==== 目标留存 (2026-08-04) ====
+        # frenet_planner 是状态覆盖式(self.obstacles = obstacles 整体替换)且每
+        # 100ms 独立规划，感知抖动/遮挡时瞬时空帧会让它丢失全部障碍物。
+        # 这里缓存障碍物一段时间，并以 world 系存储、发布时反算回 base_link，
+        # 使车辆前进时缓存障碍物的相对位置自动正确后退（而非"粘"在原地）。
+        self.declare_parameter('obstacle_memory_ms', 500)      # 缓存保留时长(ms)
+        self.declare_parameter('enable_dead_reckoning', True)  # 位姿推算(需 world→base_link TF)
+        self.declare_parameter('world_frame', 'map')           # 推算参考系
+        self.declare_parameter('publish_rate_hz', 20.0)        # 发布频率(独立于感知帧率)
+        self.memory_ns = int(self.get_parameter('obstacle_memory_ms').value) * 1_000_000
+        self.dead_reckoning = self.get_parameter('enable_dead_reckoning').value
+        self.world_frame = self.get_parameter('world_frame').value
+
+        # 缓存: marker id → {world_xyz|base_xyz, scale, label, stamp_ns, has_world}
+        self._cache = {}
+
         # Subscribe to our obstacle boxes (topic switchable via input_topic param)
         self.sub = self.create_subscription(
             MarkerArray,
@@ -95,80 +111,129 @@ class ObstacleAdapter(Node):
             10,
         )
 
+        # 定时发布: 即使感知无输出也维持缓存障碍物的连续发布
+        rate = float(self.get_parameter('publish_rate_hz').value)
+        self.timer = self.create_timer(1.0 / rate, self._publish_cached)
+
         self._frame_count = 0
         self._log_interval = 10
 
         self.get_logger().info(
-            f'Obstacle Adapter ready — /obstacles/boxes → /obstacle_markers '
-            f'(TF: {self.source_frame} → {self.target_frame})'
+            f'Obstacle Adapter ready — {self.input_topic} → /obstacle_markers '
+            f'(TF: {self.source_frame} → {self.target_frame}, '
+            f'memory={self.memory_ns // 1_000_000}ms, '
+            f'dead_reckoning={self.dead_reckoning})'
         )
+
+    def _lookup(self, target: str, source: str):
+        """TF lookup helper. Returns TransformStamped or None."""
+        try:
+            return self.tf_buffer.lookup_transform(target, source, rclpy.time.Time())
+        except Exception:
+            return None
+
+    @staticmethod
+    def _apply_transform(t: TransformStamped, px: float, py: float, pz: float):
+        """Rotate by the transform's quaternion, then translate."""
+        tr = t.transform.translation
+        q = t.transform.rotation
+        qw, qx, qy, qz = q.w, q.x, q.y, q.z
+        # p' = p + 2*cross(q.xyz, cross(q.xyz, p) + q.w*p)
+        cx = 2.0 * (qy * pz - qz * py)
+        cy = 2.0 * (qz * px - qx * pz)
+        cz = 2.0 * (qx * py - qy * px)
+        rx = px + qw * cx + (qy * cz - qz * cy)
+        ry = py + qw * cy + (qz * cx - qx * cz)
+        rz = pz + qw * cz + (qx * cy - qy * cx)
+        return rx + tr.x, ry + tr.y, rz + tr.z
 
     def callback(self, msg: MarkerArray):
         self._frame_count += 1
 
         # Look up source_frame → target_frame transform (2026-07-29: configurable)
-        try:
-            t: TransformStamped = self.tf_buffer.lookup_transform(
-                self.target_frame, self.source_frame, rclpy.time.Time()
-            )
-        except Exception as e:
-            self.get_logger().warn(f'TF lookup failed: {e}', throttle_duration_sec=5.0)
+        t = self._lookup(self.target_frame, self.source_frame)
+        if t is None:
+            self.get_logger().warn('TF lookup failed (sensor→base_link)',
+                                   throttle_duration_sec=5.0)
             return
 
-        now = self.get_clock().now().to_msg()
-        out = MarkerArray()
+        # world→base_link 的逆变换用于把 base_link 坐标存成 world 坐标
+        t_w = self._lookup(self.world_frame, self.target_frame) if self.dead_reckoning else None
+
+        now_ns = self.get_clock().now().nanoseconds
 
         for marker in msg.markers:
             if marker.action != Marker.ADD:
                 continue
 
             # 2026-07-29: passthrough mode preserves 3D pipeline classification
-            if self.passthrough:
-                TYPE_MAP = {'slope': 3, 'bump': 2, 'pole': 1, 'obstacle': 0}
-                label = marker.ns
-                type_id = TYPE_MAP.get(label, 0)
+            label = marker.ns if self.passthrough else classify_obstacle(marker.scale)[0]
+
+            # Transform position from sensor frame → base_link
+            base_x, base_y, base_z = self._apply_transform(
+                t, marker.pose.position.x, marker.pose.position.y, marker.pose.position.z)
+
+            entry = {
+                'scale': marker.scale,
+                'label': label,
+                'stamp_ns': now_ns,
+                'base_xyz': (base_x, base_y, base_z),
+                'has_world': False,
+            }
+            # 入库时记录 world 坐标，发布时可反算回当前 base_link
+            if t_w is not None:
+                entry['world_xyz'] = self._apply_transform(t_w, base_x, base_y, base_z)
+                entry['has_world'] = True
+
+            self._cache[marker.id] = entry
+
+    def _publish_cached(self):
+        """Publish cached obstacles, re-projecting world coords into current base_link."""
+        now_ns = self.get_clock().now().nanoseconds
+
+        # 清理过期条目
+        expired = [k for k, v in self._cache.items()
+                   if now_ns - v['stamp_ns'] > self.memory_ns]
+        for k in expired:
+            del self._cache[k]
+
+        if not self._cache:
+            self.pub.publish(MarkerArray())
+            return
+
+        # base_link←world 变换：把缓存的 world 坐标反算回当前车体系
+        t_b = self._lookup(self.target_frame, self.world_frame) if self.dead_reckoning else None
+        if self.dead_reckoning and t_b is None:
+            self.get_logger().warn(
+                f'TF {self.world_frame}→{self.target_frame} unavailable — '
+                'holding cached positions without dead reckoning',
+                throttle_duration_sec=5.0)
+
+        now = self.get_clock().now().to_msg()
+        out = MarkerArray()
+
+        for mid, e in self._cache.items():
+            if t_b is not None and e['has_world']:
+                wx, wy, wz = e['world_xyz']
+                px, py, pz = self._apply_transform(t_b, wx, wy, wz)
             else:
-                label, type_id = classify_obstacle(marker.scale)
+                px, py, pz = e['base_xyz']  # 降级: 保持入库时的相对位置
 
-            # Transform position from laser_link → base_link
-            # T_base_laser = (tx, ty, tz, qx, qy, qz, qw)
-            tr = t.transform.translation
-            q = t.transform.rotation
-            px, py, pz = marker.pose.position.x, marker.pose.position.y, marker.pose.position.z
-
-            # Apply rotation then translation
-            # p_base = R_laser→base_link * p_laser + t_laser→base_link
-            # Using quaternion rotation
-            qw, qx, qy, qz = q.w, q.x, q.y, q.z
-            # Rotate point: p' = q * p * q_conj
-            # Simplified: p' = p + 2 * cross(q.xyz, cross(q.xyz, p) + q.w * p)
-            cx = 2.0 * (qy * pz - qz * py)
-            cy = 2.0 * (qz * px - qx * pz)
-            cz = 2.0 * (qx * py - qy * px)
-            rx = px + qw * cx + (qy * cz - qz * cy)
-            ry = py + qw * cy + (qz * cx - qx * cz)
-            rz = pz + qw * cz + (qx * cy - qy * cx)
-
-            base_x = rx + tr.x
-            base_y = ry + tr.y
-            base_z = rz + tr.z
-
-            # Create CUBE marker in base_link
             m = Marker()
-            m.header.frame_id = 'base_link'
+            m.header.frame_id = self.target_frame
             m.header.stamp = now
-            m.ns = label
-            m.id = marker.id
+            m.ns = e['label']
+            m.id = mid
             m.type = Marker.CUBE
             m.action = Marker.ADD
-            m.pose.position.x = base_x
-            m.pose.position.y = base_y
-            m.pose.position.z = base_z
+            m.pose.position.x = px
+            m.pose.position.y = py
+            m.pose.position.z = pz
             m.pose.orientation.w = 1.0
-            m.scale = marker.scale
+            m.scale = e['scale']
 
             # 使用与surface_detector一致的颜色
-            r, g, b, a = TYPE_COLORS.get(label, TYPE_COLORS['obstacle'])
+            r, g, b, a = TYPE_COLORS.get(e['label'], TYPE_COLORS['obstacle'])
             m.color.r = r
             m.color.g = g
             m.color.b = b
@@ -178,7 +243,7 @@ class ObstacleAdapter(Node):
 
         self.pub.publish(out)
 
-        if self._frame_count % self._log_interval == 0:
+        if self._frame_count % self._log_interval == 0 and out.markers:
             types = {}
             for m in out.markers:
                 types[m.ns] = types.get(m.ns, 0) + 1
