@@ -121,6 +121,99 @@ def _extract_boundaries(
     return left_arr, right_arr
 
 
+def _fit_line_ransac(pts: np.ndarray, max_iterations: int = 100, distance_threshold: float = 0.5) -> tuple:
+    """
+    用RANSAC拟合直线，返回 (inliers_mask, slope, intercept).
+
+    直线方程: y = slope * x + intercept
+    如果点太少或拟合失败，返回 (None, None, None)
+    """
+    if len(pts) < 5:
+        return None, None, None
+
+    best_inliers = []
+    best_slope = None
+    best_intercept = None
+
+    for _ in range(max_iterations):
+        # 随机选2点
+        idx = np.random.choice(len(pts), 2, replace=False)
+        p1, p2 = pts[idx[0]], pts[idx[1]]
+
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+
+        if abs(dx) < 1e-6:  # 垂直线，跳过
+            continue
+
+        slope = dy / dx
+        intercept = p1[1] - slope * p1[0]
+
+        # 计算所有点到直线距离
+        # 点到直线 y = mx + b 的距离: |y - mx - b| / sqrt(1 + m^2)
+        distances = np.abs(pts[:, 1] - slope * pts[:, 0] - intercept) / np.sqrt(1 + slope**2)
+        inliers_mask = distances < distance_threshold
+
+        if inliers_mask.sum() > len(best_inliers):
+            best_inliers = inliers_mask
+            best_slope = slope
+            best_intercept = intercept
+
+    if len(best_inliers) < 5:
+        return None, None, None
+
+    return best_inliers, best_slope, best_intercept
+
+
+def _validate_road_boundaries(left: np.ndarray, right: np.ndarray,
+                               expected_width: float = 8.0,
+                               width_tolerance: float = 4.0,
+                               parallelism_threshold: float = 0.3) -> tuple:
+    """
+    语义约束验证: 道路边界应该是两条大致平行的直线.
+
+    Args:
+        left, right: (N,2) 边界点 [x, y]
+        expected_width: 预期道路宽度 (m)
+        width_tolerance: 宽度容差 (m)
+        parallelism_threshold: 平行性阈值 (斜率差)
+
+    Returns:
+        (valid_left, valid_right): 过滤后的边界点，如果验证失败返回空数组
+    """
+    # 1. 点数检查
+    if len(left) < 5 or len(right) < 5:
+        return np.zeros((0, 2)), np.zeros((0, 2))
+
+    # 2. RANSAC拟合直线
+    left_inliers, left_slope, left_intercept = _fit_line_ransac(left)
+    right_inliers, right_slope, right_intercept = _fit_line_ransac(right)
+
+    if left_slope is None or right_slope is None:
+        return np.zeros((0, 2)), np.zeros((0, 2))
+
+    # 3. 平行性检查: 斜率差应该很小
+    slope_diff = abs(left_slope - right_slope)
+    if slope_diff > parallelism_threshold:
+        # 不平行，可能是误检
+        return np.zeros((0, 2)), np.zeros((0, 2))
+
+    # 4. 宽度检查: 取中点位置计算两线距离
+    # 点 (x0, y0) 到直线 y = mx + b 的距离: |y0 - mx0 - b| / sqrt(1 + m^2)
+    # 取前方5m处的宽度
+    x_test = 5.0
+    y_left = left_slope * x_test + left_intercept
+    y_right = right_slope * x_test + right_intercept
+    width = abs(y_left - y_right)
+
+    if width < (expected_width - width_tolerance) or width > (expected_width + width_tolerance):
+        # 宽度不合理，可能是误检
+        return np.zeros((0, 2)), np.zeros((0, 2))
+
+    # 5. 返回内点
+    return left[left_inliers], right[right_inliers]
+
+
 def _smooth_boundary(pts: np.ndarray, window: int = 5) -> np.ndarray:
     """Moving-average smooth boundary points (sorted by angle)."""
     if len(pts) < window:
@@ -293,6 +386,31 @@ class RoadAnalyzer(Node):
         # smooth
         left_sm = _smooth_boundary(left, win)
         right_sm = _smooth_boundary(right, win)
+
+        # --- 语义验证: 两条边界应该是平行直线 ---
+        left_valid, right_valid = _validate_road_boundaries(left_sm, right_sm)
+
+        # 如果验证失败，发布空标记并返回
+        if len(left_valid) == 0 or len(right_valid) == 0:
+            if self._frame_count % log_int == 0:
+                self.get_logger().warn(
+                    f'Frame {self._frame_count}: Boundary validation failed '
+                    f'(left={len(left_sm)}pts, right={len(right_sm)}pts rejected - not parallel lines)',
+                    throttle_duration_sec=3.0
+                )
+            # 发布空标记清除之前的显示
+            markers = MarkerArray()
+            now = self.get_clock().now().to_msg()
+            empty_left = _boundary_to_linestrip(np.zeros((0, 2)), 'base_link', 'road_left', 0, now)
+            empty_right = _boundary_to_linestrip(np.zeros((0, 2)), 'base_link', 'road_right', 1, now)
+            markers.markers.append(empty_left)
+            markers.markers.append(empty_right)
+            self.pub_boundaries.publish(markers)
+            return
+
+        # 使用验证后的边界点
+        left_sm = left_valid
+        right_sm = right_valid
 
         # --- TF: transform boundary points sensor_frame → base_link ---
         source_frame = msg.header.frame_id
