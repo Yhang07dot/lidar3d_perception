@@ -243,10 +243,11 @@ def launch_setup(context, *args, **kwargs):
 
     # always
     nodes.append(filter_node)
-    nodes.extend([patch_node, cluster_node, bbox_node, adapter_node])
+    nodes.extend([patch_node, bbox_node, adapter_node])
     # 2026-07-29: LiDAR perception replacing truth data
     nodes.append(road_node)
     # 2026-08-05: removed voxel_analyzer (redundant with surface_detector)
+    # 2026-08-05: removed euclidean_grid cluster_node (redundant with surface_detector)
     nodes.append(surface_cpp_node)
     # 2026-08-05: removed boundary_node (redundant with road_analyzer)
     nodes.extend([rviz_raw_node, rviz_proc_node, rviz_surface_node])
