@@ -2,20 +2,19 @@
 """
 Obstacle adapter: classify + transform + republish for planning/control.
 
-Subscribes to /obstacles/boxes (CUBE MarkerArray from cluster_bbox).
-Classifies each obstacle by 3D shape, transforms to base_link via TF,
-and publishes to /obstacle_markers (format expected by baja_cloud_sim planner).
+Subscribes to /obstacles/boxes_3d_surface (MarkerArray from surface_detector).
+Simplifies 5-class terrain classification to 2 obstacle types for control:
+  - "tall"        — impassable obstacles requiring avoidance
+  - "flat_ground" — passable terrain (slow down if needed)
+
+Transforms to base_link via TF and publishes to /obstacle_markers.
 
 Parameters:
   source_frame  — frame of incoming markers (default: 'laser_link')
   target_frame  — frame to transform markers into (default: 'base_link')
 
-Classifications:
-  0 = generic obstacle
-  1 = pole      (tall, thin; height / width > 2.0)
-  2 = bump      (low, flat; height < 0.25m)
-
 Changelog:
+  2026-08-05: Simplified to 2-class output (tall/flat_ground) for control.
   2026-07-29: source_frame/target_frame made configurable for sim mode.
 """
 
@@ -27,37 +26,35 @@ from geometry_msgs.msg import TransformStamped
 from tf2_ros import Buffer, TransformListener
 
 
-# 颜色映射 - 与surface_detector保持一致 (2026-08-03)
+# 2-class color mapping for control interface (2026-08-05)
 TYPE_COLORS = {
-    'obstacle': (1.0, 0.0, 0.0, 0.7),      # 红色 - 不可通过
-    'passable_low': (0.0, 0.8, 0.0, 0.5),  # 绿色 - 可通过
-    'passable_high': (1.0, 0.9, 0.0, 0.6), # 黄色 - 减速通过
-    'boundary': (0.0, 0.5, 1.0, 0.6),      # 蓝色 - 路沿
-    'unknown': (0.7, 0.7, 0.7, 0.4),       # 灰色 - 未知
+    'tall': (1.0, 0.0, 0.0, 0.7),          # 红色 - 不可通过，需绕行
+    'flat_ground': (0.0, 0.8, 0.0, 0.5),   # 绿色 - 可通过，减速
 }
 
 
-def classify_obstacle(scale):
+def simplify_classification(surface_ns: str) -> str:
     """
-    Classify obstacle by bounding box shape.
-    Returns (label_str, type_id).
+    Map 5-class surface_detector output to 2-class control interface.
+
+    Input (from surface_detector C++):
+      - "obstacle"       → tall (impassable, avoid)
+      - "passable_low"   → flat_ground (passable)
+      - "passable_high"  → flat_ground (passable, slow)
+      - "boundary"       → SKIP (handled by road_analyzer → /road_boundary_markers)
+      - "unknown"        → flat_ground (conservative: treat as passable)
+
+    Returns: "tall" | "flat_ground" | None (None = skip boundary markers)
     """
-    dims = sorted([scale.x, scale.y, scale.z])  # ascending
-    d_min, d_mid, d_max = dims  # smallest, middle, largest dimension
-
-    height = d_max
-    width = d_mid if d_mid > 0.01 else 0.01
-
-    # Low and flat → bump / speed bump
-    if height < 0.25:
-        return "bump", 2
-
-    # Tall and thin → pole
-    aspect_ratio = height / width
-    if height > 0.3 and aspect_ratio > 2.0:
-        return "pole", 1
-
-    return "generic", 0
+    if surface_ns == "obstacle":
+        return "tall"
+    elif surface_ns in ("passable_low", "passable_high", "unknown"):
+        return "flat_ground"
+    elif surface_ns == "boundary":
+        return None  # road boundaries handled separately
+    else:
+        # Unknown label from upstream → default to flat_ground (conservative)
+        return "flat_ground"
 
 
 class ObstacleAdapter(Node):
@@ -166,8 +163,15 @@ class ObstacleAdapter(Node):
             if marker.action != Marker.ADD:
                 continue
 
-            # 2026-07-29: passthrough mode preserves 3D pipeline classification
-            label = marker.ns if self.passthrough else classify_obstacle(marker.scale)[0]
+            # 2026-08-05: Simplify 5-class → 2-class for control interface
+            # (passthrough=True means input is from surface_detector with ns classification)
+            if self.passthrough:
+                label = simplify_classification(marker.ns)
+                if label is None:  # Skip boundary markers (handled by road_analyzer)
+                    continue
+            else:
+                # Fallback: old 2D pipeline doesn't use ns classification
+                label = "flat_ground"  # Conservative default
 
             # Transform position from sensor frame → base_link
             base_x, base_y, base_z = self._apply_transform(
@@ -232,8 +236,8 @@ class ObstacleAdapter(Node):
             m.pose.orientation.w = 1.0
             m.scale = e['scale']
 
-            # 使用与surface_detector一致的颜色
-            r, g, b, a = TYPE_COLORS.get(e['label'], TYPE_COLORS['obstacle'])
+            # 使用2类颜色映射
+            r, g, b, a = TYPE_COLORS.get(e['label'], TYPE_COLORS['tall'])  # 默认红色(tall)
             m.color.r = r
             m.color.g = g
             m.color.b = b

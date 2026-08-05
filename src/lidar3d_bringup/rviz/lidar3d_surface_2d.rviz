@@ -50,6 +50,22 @@ Visualization Manager:
         Durability Policy: Volatile
         Reliability Policy: Reliable
         Value: /lidar/pothole_markers
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Obstacle Markers (tall/flat_ground)
+      Enabled: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        Value: /obstacle_markers
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Road Boundary
+      Enabled: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        Value: /road_boundary_markers
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48

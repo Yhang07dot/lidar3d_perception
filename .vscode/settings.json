@@ -1,3 +1,4 @@
 {
-    "cmake.sourceDirectory": "/home/yaoh/lidar3d_ws/build/patchworkpp/_deps/eigen-subbuild"
+    "cmake.sourceDirectory": "/home/yaoh/lidar3d_ws/build/patchworkpp/_deps/eigen-subbuild",
+    "claudeCode.useTerminal": true
 }

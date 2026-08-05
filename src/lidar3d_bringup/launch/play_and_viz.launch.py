@@ -146,21 +146,8 @@ def launch_setup(context, *args, **kwargs):
         condition=seg_enabled,
     )
 
-    # --- euclidean clustering ---
-    cluster_node = Node(
-        package='lidar_cluster', executable='euclidean_grid',
-        name='euclidean_grid', output='screen',
-        parameters=[{
-            'use_sim_time': use_sim_time_val,
-            'points_in_topic': '/patchworkpp/nonground',
-            'points_out_topic': '/clusters/points',
-            'marker_out_topic': '/clusters/markers',
-            'tolerance': 0.5, 'voxel_leaf_size': 0.1,
-            'min_points_number_per_voxel': 3, 'max_cluster_size': 50000,
-            'verbose1': False, 'verbose2': False,
-        }],
-        condition=seg_enabled,
-    )
+    # --- euclidean clustering (removed 2026-08-05) ---
+    # euclidean_grid from lidar_cluster package - redundant with surface_detector
 
     # --- bounding boxes ---
     bbox_node = Node(
@@ -179,6 +166,9 @@ def launch_setup(context, *args, **kwargs):
     else:
         adapter_input = '/obstacles/boxes'
 
+    # 2026-08-05: adapter should run when either ground_seg OR lidar_perception is enabled
+    adapter_enabled = use_lidar_percep or (LaunchConfiguration('enable_ground_seg').perform(context).lower() == 'true')
+
     adapter_node = Node(
         package='lidar3d_bringup', executable='obstacle_adapter',
         name='obstacle_adapter', output='screen',
@@ -191,29 +181,28 @@ def launch_setup(context, *args, **kwargs):
                 'passthrough': use_voxel or use_surface,
             }
         ],
-        condition=seg_enabled,
     )
 
     # --- LiDAR perception replacing truth data (controlled by use_lidar_perception) ---
     lidar_percep_cond = IfCondition(LaunchConfiguration('use_lidar_perception'))
 
-    # --- 2026-07-30: voxel-based analyser (parallel to cluster_analyzer) ---
-    voxel_cond = IfCondition(LaunchConfiguration('use_voxel_analyzer'))
+    # 2026-08-05: perception_mode parameter controls output topic routing
+    # - 'lidar': LiDAR outputs to /obstacle_markers and /road_boundary_markers (replace truth)
+    # - 'truth': Truth outputs to /obstacle_markers and /road_boundary_markers (LiDAR to /lidar/* namespace)
+    # - 'hybrid': Both publish to their own namespaces for comparison
+    perception_mode = LaunchConfiguration('perception_mode').perform(context)
 
-    voxel_node = Node(
-        package='lidar3d_bringup', executable='voxel_analyzer',
-        name='voxel_analyzer', output='screen',
-        parameters=[params_file, {'use_sim_time': use_sim_time_val}],
-        condition=voxel_cond,
-    )
+    # Road analyzer remapping based on mode
+    if perception_mode == 'lidar':
+        road_remappings = [('/lidar/road_boundary_markers', '/road_boundary_markers')]
+    else:  # 'truth' or 'hybrid'
+        road_remappings = []
 
     road_node = Node(
         package='lidar3d_bringup', executable='road_analyzer',
         name='road_analyzer', output='screen',
         parameters=[params_file, {'use_sim_time': use_sim_time_val}],
-        # 2026-08-04: use_lidar_perception 时把路沿输出接到规控订阅的话题
-        # (frenet_planner 订阅 /road_boundary_markers, ns=road_left/road_right)
-        remappings=[('/lidar/road_boundary_markers', '/road_boundary_markers')],
+        remappings=road_remappings,
         condition=lidar_percep_cond,
     )
 
@@ -223,14 +212,6 @@ def launch_setup(context, *args, **kwargs):
         name='surface_detector', output='screen',
         parameters=[params_file, {'use_sim_time': use_sim_time_val}],
         condition=IfCondition(LaunchConfiguration('use_surface_detector')),
-    )
-
-    # --- 2026-08-03: boundary detector ---
-    boundary_node = Node(
-        package='lidar3d_bringup', executable='boundary_detector',
-        name='boundary_detector', output='screen',
-        parameters=[params_file, {'use_sim_time': use_sim_time_val}],
-        condition=IfCondition(LaunchConfiguration('use_boundary_detector')),
     )
 
     # --- rviz2 ---
@@ -275,10 +256,9 @@ def launch_setup(context, *args, **kwargs):
     nodes.extend([patch_node, cluster_node, bbox_node, adapter_node])
     # 2026-07-29: LiDAR perception replacing truth data
     nodes.append(road_node)
-    # 2026-07-30: voxel analyser (parallel to cluster_analyzer)
-    nodes.append(voxel_node)
+    # 2026-08-05: removed voxel_analyzer (redundant with surface_detector)
     nodes.append(surface_cpp_node)
-    nodes.append(boundary_node)
+    # 2026-08-05: removed boundary_node (redundant with road_analyzer)
     nodes.extend([rviz_raw_node, rviz_proc_node, rviz_voxel_node, rviz_surface_node])
 
     return nodes
@@ -323,15 +303,16 @@ def generate_launch_description():
             description='LiDAR height above ground (m)'),
         DeclareLaunchArgument('enable_ground_seg', default_value='true',
             description='Enable ground segmentation + downstream'),
-        # 2026-07-29: 3D clustering pipeline for slope-obstacle discrimination
+
+        # 2026-08-05: perception_mode replaces use_lidar_perception for flexible topic routing
+        DeclareLaunchArgument('perception_mode', default_value='lidar',
+            description="'lidar': LiDAR replaces truth topics | 'truth': truth only | 'hybrid': both in separate namespaces"),
         DeclareLaunchArgument('use_lidar_perception', default_value='false',
-            description='Replace truth_perception data with LiDAR-based road boundaries+obstacles'),
-        DeclareLaunchArgument('use_voxel_analyzer', default_value='false',
-            description='Use voxel-grid analyser instead of PCA-on-clusters'),
+            description='(Deprecated: use perception_mode) Enable LiDAR-based perception pipeline'),
+
         DeclareLaunchArgument('use_surface_detector', default_value='false',
             description='Use terrain-surface fitting detector (C++, recommended)'),
-        DeclareLaunchArgument('use_boundary_detector', default_value='false',
-            description='Use road boundary detector (extract left/right boundaries)'),
+
         DeclareLaunchArgument('use_rviz_raw', default_value='true',
             description='Show raw filtered point cloud rviz2 window'),
         DeclareLaunchArgument('use_rviz_proc', default_value='true',

@@ -32,14 +32,11 @@ setup(
     entry_points={
         'console_scripts': [
             'tf_publisher = lidar3d_bringup.tf_publisher:main',
-            'tf_bridge = lidar3d_bringup.tf_bridge:main',        # 2026-07-29: sim mode dynamic TF
+            'tf_bridge = lidar3d_bringup.tf_bridge:main',
             'pointcloud_filter = lidar3d_bringup.pointcloud_filter:main',
             'cluster_bbox = lidar3d_bringup.cluster_bbox:main',
             'obstacle_adapter = lidar3d_bringup.obstacle_adapter:main',
-            'road_analyzer = lidar3d_bringup.road_analyzer:main',                 # 2026-07-29: LiDAR perception
-            'voxel_analyzer = lidar3d_bringup.voxel_analyzer:main',                 # 2026-07-30: voxel-based analysis
-            'surface_detector = lidar3d_bringup.surface_detector:main',             # 2026-07-31: surface-fitting approach
-            'boundary_detector = lidar3d_bringup.boundary_detector:main',           # 2026-08-03: road boundary detection
+            'road_analyzer = lidar3d_bringup.road_analyzer:main',
         ],
     },
 )
