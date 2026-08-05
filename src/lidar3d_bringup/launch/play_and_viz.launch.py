@@ -47,7 +47,6 @@ def launch_setup(context, *args, **kwargs):
     use_sim_time_val = src in ('rosbag', 'simulation')
     # 2026-07-29: 3D clustering pipeline (parallel to 2D, for slope-obstacle discrimination)
     use_lidar_percep = LaunchConfiguration('use_lidar_perception').perform(context).lower() == 'true'
-    use_voxel = LaunchConfiguration('use_voxel_analyzer').perform(context).lower() == 'true'
     use_surface = LaunchConfiguration('use_surface_detector').perform(context).lower() == 'true'
 
     # Use_ ROS bag params (only in rosbag mode)
@@ -158,11 +157,9 @@ def launch_setup(context, *args, **kwargs):
     )
 
     # --- classify + transform → /obstacle_markers ---
-    # resolve input topic: voxel > 2D
+    # resolve input topic: surface_detector > cluster_bbox fallback
     if use_surface:
         adapter_input = '/obstacles/boxes_3d_surface'
-    elif use_voxel:
-        adapter_input = '/obstacles/boxes_3d_voxel'
     else:
         adapter_input = '/obstacles/boxes'
 
@@ -178,7 +175,7 @@ def launch_setup(context, *args, **kwargs):
                 'use_sim_time': use_sim_time_val,
                 'source_frame': 'laser_link' if is_rosbag else 'baja_vehicle/base_link/lidar',
                 'input_topic': adapter_input,
-                'passthrough': use_voxel or use_surface,
+                'passthrough': use_surface,
             }
         ],
     )
