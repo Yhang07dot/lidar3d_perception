@@ -18,6 +18,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, TextSubstitution
 from launch_ros.actions import Node
 from launch.actions import OpaqueFunction
@@ -95,12 +96,41 @@ def launch_setup(context, *args, **kwargs):
         ],
     )
 
+    # --- rviz2: 三个独立窗口 (复用 play_and_viz 配置) ---
+    use_rviz = LaunchConfiguration('use_rviz').perform(context).lower() == 'true'
+
+    rviz_raw = os.path.join(pkg_share, 'rviz', 'lidar3d_raw.rviz')
+    rviz_proc = os.path.join(pkg_share, 'rviz', 'lidar3d_processed.rviz')
+    rviz_surface = os.path.join(pkg_share, 'rviz', 'lidar3d_surface_2d.rviz')
+
+    rviz_raw_node = Node(
+        package='rviz2', executable='rviz2', name='rviz2_raw',
+        arguments=['-d', rviz_raw],
+        parameters=[{'use_sim_time': True}], output='screen',
+        condition=IfCondition('use_rviz' if use_rviz else 'false'),
+    )
+    rviz_proc_node = Node(
+        package='rviz2', executable='rviz2', name='rviz2_proc',
+        arguments=['-d', rviz_proc],
+        parameters=[{'use_sim_time': True}], output='screen',
+        condition=IfCondition('use_rviz' if use_rviz else 'false'),
+    )
+    rviz_surface_node = Node(
+        package='rviz2', executable='rviz2', name='rviz2_surface',
+        arguments=['-d', rviz_surface],
+        parameters=[{'use_sim_time': True}], output='screen',
+        condition=IfCondition('use_rviz' if use_rviz else 'false'),
+    )
+
     return [
         sensor_tf_node,
         filter_node,
         patch_node,
         surface_detector_node,
         adapter_node,
+        rviz_raw_node,
+        rviz_proc_node,
+        rviz_surface_node,
     ]
 
 
@@ -117,5 +147,7 @@ def generate_launch_description():
             description='Vehicle base_link frame for output markers'),
         DeclareLaunchArgument('perception_mode', default_value='lidar',
             description='Topic routing mode (kept for compatibility)'),
+        DeclareLaunchArgument('use_rviz', default_value='true',
+            description='Show 3 rviz2 windows (raw / processed / surface obstacles)'),
         OpaqueFunction(function=launch_setup),
     ])

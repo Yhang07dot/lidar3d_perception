@@ -105,7 +105,9 @@ echo "========================================="
 cd "$LIDAR_WS_PATH"
 source install/setup.bash 2>/dev/null || source /opt/ros/humble/setup.bash
 
-ros2 launch lidar3d_bringup lidar_sim.launch.py &
+PERCEP_RVIZ_ARG=""
+[ "$USE_RVIZ" = "false" ] && PERCEP_RVIZ_ARG="use_rviz:=false"
+ros2 launch lidar3d_bringup lidar_sim.launch.py $PERCEP_RVIZ_ARG &
 PERCEP_PID=$!
 
 echo ""
