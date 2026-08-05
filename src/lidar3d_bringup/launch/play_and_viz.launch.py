@@ -21,7 +21,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration, PythonExpression
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
@@ -217,26 +217,12 @@ def launch_setup(context, *args, **kwargs):
         condition=lidar_percep_cond,
     )
 
-    # --- 2026-07-31: surface-fitting detector (Python 版) ---
-    surface_node = Node(
-        package='lidar3d_bringup', executable='surface_detector',
-        name='surface_detector', output='screen',
-        parameters=[params_file, {'use_sim_time': use_sim_time_val}],
-        condition=IfCondition(PythonExpression([
-            "'", LaunchConfiguration('use_surface_detector'),
-            "'.lower() == 'true' and '", LaunchConfiguration('use_cpp_detector'),
-            "'.lower() != 'true'"])),
-    )
-
-    # --- 2026-08-04: surface-fitting detector (C++ 版, 同参数同话题) ---
+    # --- 2026-08-04: surface-fitting detector (C++ version) ---
     surface_cpp_node = Node(
         package='lidar3d_perception_cpp', executable='surface_detector_node',
         name='surface_detector', output='screen',
         parameters=[params_file, {'use_sim_time': use_sim_time_val}],
-        condition=IfCondition(PythonExpression([
-            "'", LaunchConfiguration('use_surface_detector'),
-            "'.lower() == 'true' and '", LaunchConfiguration('use_cpp_detector'),
-            "'.lower() == 'true'"])),
+        condition=IfCondition(LaunchConfiguration('use_surface_detector')),
     )
 
     # --- 2026-08-03: boundary detector ---
@@ -291,7 +277,6 @@ def launch_setup(context, *args, **kwargs):
     nodes.append(road_node)
     # 2026-07-30: voxel analyser (parallel to cluster_analyzer)
     nodes.append(voxel_node)
-    nodes.append(surface_node)
     nodes.append(surface_cpp_node)
     nodes.append(boundary_node)
     nodes.extend([rviz_raw_node, rviz_proc_node, rviz_voxel_node, rviz_surface_node])
@@ -344,10 +329,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_voxel_analyzer', default_value='false',
             description='Use voxel-grid analyser instead of PCA-on-clusters'),
         DeclareLaunchArgument('use_surface_detector', default_value='false',
-            description='Use terrain-surface fitting detector (recommended)'),
-        DeclareLaunchArgument('use_cpp_detector', default_value='false',
-            description='Run the C++ surface detector instead of the Python one '
-                        '(same topics/params; requires use_surface_detector:=true)'),
+            description='Use terrain-surface fitting detector (C++, recommended)'),
         DeclareLaunchArgument('use_boundary_detector', default_value='false',
             description='Use road boundary detector (extract left/right boundaries)'),
         DeclareLaunchArgument('use_rviz_raw', default_value='true',

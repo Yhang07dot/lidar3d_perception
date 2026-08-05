@@ -31,7 +31,7 @@
 pointcloud_filter:
   ros__parameters:
     # 距离过滤
-    max_range: 25.0                  # 最大距离 (m). 16线建议≤25m, >30m点云过于稀疏
+    max_range: 30.0                  # 最大距离 (m). 16线建议≤25m, >30m点云过于稀疏
     min_range: 0.1                   # 最小距离 (m), 过滤自身反射点
 
     # 高度过滤
