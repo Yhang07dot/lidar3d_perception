@@ -57,6 +57,7 @@ def launch_setup(context, *args, **kwargs):
 
     # Patchwork++ param
     sensor_height = LaunchConfiguration('sensor_height').perform(context)
+    sensor_frame = LaunchConfiguration('sensor_frame').perform(context)
 
     bag_dir = os.path.expanduser(bag_dir)
 
@@ -105,7 +106,7 @@ def launch_setup(context, *args, **kwargs):
         parameters=[{
             'use_sim_time': use_sim_time_val,
             'parent_frame': 'base_link',
-            'child_frame': 'baja_vehicle/base_link/lidar',
+            'child_frame': sensor_frame,
             'x': 0.5, 'y': 0.0, 'z': 1.5,
             'rate': 10.0,
         }],
@@ -137,7 +138,7 @@ def launch_setup(context, *args, **kwargs):
         parameters=[{
             'use_sim_time': use_sim_time_val,
             # 2026-07-29: sim mode uses Gazebo frame directly; rosbag keeps laser_link
-            'base_frame': 'laser_link' if is_rosbag else 'baja_vehicle/base_link/lidar',
+            'base_frame': 'laser_link' if is_rosbag else sensor_frame,
             'sensor_height': float(sensor_height),
             'max_range': 50.0, 'min_range': 1.0, 'verbose': False,
         }],
@@ -172,7 +173,7 @@ def launch_setup(context, *args, **kwargs):
             params_file,
             {
                 'use_sim_time': use_sim_time_val,
-                'source_frame': 'laser_link' if is_rosbag else 'baja_vehicle/base_link/lidar',
+                'source_frame': 'laser_link' if is_rosbag else sensor_frame,
                 'input_topic': adapter_input,
                 'passthrough': use_surface,
             }
@@ -292,6 +293,9 @@ def generate_launch_description():
         # --- sensor ---
         DeclareLaunchArgument('sensor_height', default_value='1.5',
             description='LiDAR height above ground (m)'),
+        DeclareLaunchArgument('sensor_frame',
+            default_value='baja_vehicle/base_link/lidar',
+            description='LiDAR sensor TF frame (used by TF bridge, patchworkpp, adapter)'),
         DeclareLaunchArgument('enable_ground_seg', default_value='true',
             description='Enable ground segmentation + downstream'),
 

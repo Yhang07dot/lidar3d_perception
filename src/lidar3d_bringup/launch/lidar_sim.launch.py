@@ -96,30 +96,30 @@ def launch_setup(context, *args, **kwargs):
         ],
     )
 
-    # --- rviz2: 三个独立窗口 (复用 play_and_viz 配置) ---
-    use_rviz = LaunchConfiguration('use_rviz').perform(context).lower() == 'true'
+    # Road boundary analyzer: 从 /patchworkpp/ground 极角间隙检测推道路左右边界。
+    # 2026-08-05: 补齐新命令缺失的节点 — 老命令(play_and_viz)在 use_lidar_perception:=true
+    # 时拉起本节点，新命令此前漏掉，导致道路两侧小障碍物/路沿边界看不到。
+    # perception_mode=lidar 时把 /lidar/road_boundary_markers 重定向为 /road_boundary_markers。
+    road_remappings = []
+    if LaunchConfiguration('perception_mode').perform(context) == 'lidar':
+        road_remappings = [('/lidar/road_boundary_markers', '/road_boundary_markers')]
+    road_node = Node(
+        package='lidar3d_bringup', executable='road_analyzer',
+        name='road_analyzer', output='screen',
+        parameters=[params_file, {'use_sim_time': True, 'require_parallel': False}],
+        remappings=road_remappings,
+    )
 
-    rviz_raw = os.path.join(pkg_share, 'rviz', 'lidar3d_raw.rviz')
-    rviz_proc = os.path.join(pkg_share, 'rviz', 'lidar3d_processed.rviz')
+    # --- rviz2: 仅 2D surface 窗口 ---
+    use_rviz_cfg = LaunchConfiguration('use_rviz')
+
     rviz_surface = os.path.join(pkg_share, 'rviz', 'lidar3d_surface_2d.rviz')
 
-    rviz_raw_node = Node(
-        package='rviz2', executable='rviz2', name='rviz2_raw',
-        arguments=['-d', rviz_raw],
-        parameters=[{'use_sim_time': True}], output='screen',
-        condition=IfCondition('use_rviz' if use_rviz else 'false'),
-    )
-    rviz_proc_node = Node(
-        package='rviz2', executable='rviz2', name='rviz2_proc',
-        arguments=['-d', rviz_proc],
-        parameters=[{'use_sim_time': True}], output='screen',
-        condition=IfCondition('use_rviz' if use_rviz else 'false'),
-    )
     rviz_surface_node = Node(
         package='rviz2', executable='rviz2', name='rviz2_surface',
         arguments=['-d', rviz_surface],
         parameters=[{'use_sim_time': True}], output='screen',
-        condition=IfCondition('use_rviz' if use_rviz else 'false'),
+        condition=IfCondition(use_rviz_cfg),
     )
 
     return [
@@ -128,8 +128,7 @@ def launch_setup(context, *args, **kwargs):
         patch_node,
         surface_detector_node,
         adapter_node,
-        rviz_raw_node,
-        rviz_proc_node,
+        road_node,
         rviz_surface_node,
     ]
 
@@ -148,6 +147,6 @@ def generate_launch_description():
         DeclareLaunchArgument('perception_mode', default_value='lidar',
             description='Topic routing mode (kept for compatibility)'),
         DeclareLaunchArgument('use_rviz', default_value='true',
-            description='Show 3 rviz2 windows (raw / processed / surface obstacles)'),
+            description='Show 1 rviz2 window (2D surface obstacles)'),
         OpaqueFunction(function=launch_setup),
     ])

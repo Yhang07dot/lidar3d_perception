@@ -36,7 +36,7 @@ Visualization Manager:
         Value: /obstacles/boxes_3d_surface
     - Class: rviz_default_plugins/MarkerArray
       Name: Low-Confidence (调试)
-      Enabled: true
+      Enabled: false
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -44,7 +44,7 @@ Visualization Manager:
         Value: /lidar/low_confidence_surface
     - Class: rviz_default_plugins/MarkerArray
       Name: Potholes
-      Enabled: true
+      Enabled: false
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -69,7 +69,7 @@ Visualization Manager:
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: odom
+    Fixed Frame: base_link
     Frame Rate: 30
   Views:
     Current:

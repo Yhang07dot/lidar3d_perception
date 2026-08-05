@@ -168,7 +168,8 @@ def _fit_line_ransac(pts: np.ndarray, max_iterations: int = 100, distance_thresh
 def _validate_road_boundaries(left: np.ndarray, right: np.ndarray,
                                expected_width: float = 8.0,
                                width_tolerance: float = 4.0,
-                               parallelism_threshold: float = 0.3) -> tuple:
+                               parallelism_threshold: float = 0.3,
+                               require_parallel: bool = False) -> tuple:
     """
     语义约束验证: 道路边界应该是两条大致平行的直线.
 
@@ -177,6 +178,8 @@ def _validate_road_boundaries(left: np.ndarray, right: np.ndarray,
         expected_width: 预期道路宽度 (m)
         width_tolerance: 宽度容差 (m)
         parallelism_threshold: 平行性阈值 (斜率差)
+        require_parallel: True=保持原有的平行+宽度严格校验(仅适用直道);
+                         False=跳过平行/宽度校验，直接返回所有边界点(支持弯道/障碍边界)
 
     Returns:
         (valid_left, valid_right): 过滤后的边界点，如果验证失败返回空数组
@@ -184,6 +187,10 @@ def _validate_road_boundaries(left: np.ndarray, right: np.ndarray,
     # 1. 点数检查
     if len(left) < 5 or len(right) < 5:
         return np.zeros((0, 2)), np.zeros((0, 2))
+
+    # 弯道/障碍边界模式: 不要求平行，返回全部边界点供可视化与贴边
+    if not require_parallel:
+        return left, right
 
     # 2. RANSAC拟合直线
     left_inliers, left_slope, left_intercept = _fit_line_ransac(left)
@@ -342,8 +349,12 @@ class RoadAnalyzer(Node):
         # >0 时只接受终点前后Z差超过此值的候选，抑制"地面点云自然稀疏边缘"误判。
         # 0.0 = 关闭(保持原有行为，所有段终点都算路沿候选)
         self.declare_parameter('height_diff_threshold', 0.0)
+        # 2026-08-05: 弯道/障碍边界支持 — False 时跳过平行+宽度严格校验(MR改造)
+        self.declare_parameter('require_parallel', False)
 
-        qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
+        # patchworkpp 发布 ground 使用 RELIABLE+TRANSIENT_LOCAL，必须匹配否则收不到数据
+        qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
+                         durability=DurabilityPolicy.TRANSIENT_LOCAL)
         latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
@@ -380,6 +391,7 @@ class RoadAnalyzer(Node):
         win = self.get_parameter('smooth_window').value
         log_int = self.get_parameter('log_interval').value
         h_diff = self.get_parameter('height_diff_threshold').value
+        req_parallel = self.get_parameter('require_parallel').value
 
         left, right = _extract_boundaries(xyz, bins, gap, min_r, max_r, h_diff)
 
@@ -388,7 +400,8 @@ class RoadAnalyzer(Node):
         right_sm = _smooth_boundary(right, win)
 
         # --- 语义验证: 两条边界应该是平行直线 ---
-        left_valid, right_valid = _validate_road_boundaries(left_sm, right_sm)
+        left_valid, right_valid = _validate_road_boundaries(
+            left_sm, right_sm, require_parallel=req_parallel)
 
         # 如果验证失败，发布空标记并返回
         if len(left_valid) == 0 or len(right_valid) == 0:

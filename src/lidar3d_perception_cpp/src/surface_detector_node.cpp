@@ -95,7 +95,9 @@ public:
     declare_parameter("log_interval", 10);
 
     rclcpp::QoS qos(10);
-    qos.best_effort();  // matches the Python node / Gazebo bridge
+    // patchworkpp 发布 ground/nonground 使用 RELIABLE+TRANSIENT_LOCAL，必须匹配
+    qos.reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE);
+    qos.durability(RMW_QOS_POLICY_DURABILITY_TRANSIENT_LOCAL);
 
     sub_ground_ = create_subscription<PointCloud2>(
       "/patchworkpp/ground", qos,
