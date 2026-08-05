@@ -101,18 +101,28 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# 检查 baja_cloud_sim-2.1 路径
-BAJA_SIM_PATH="/home/yaoh/baja_cloud_sim-2.1"
+# 检查 baja_cloud_sim 路径（支持 2.1 和 2.2）
+BAJA_SIM_PATH="${BAJA_SIM_PATH:-/home/yaoh/baja_cloud_sim-2.2}"
 if [ ! -d "$BAJA_SIM_PATH" ]; then
-    echo "错误: 找不到 baja_cloud_sim-2.1 目录"
+    echo "错误: 找不到 baja_cloud_sim 目录"
     echo "请检查路径: $BAJA_SIM_PATH"
     exit 1
+fi
+
+# 检测版本：2.1 支持 --use-lidar-perception，2.2 不支持
+SIM_VERSION="unknown"
+if grep -q "use-lidar-perception" "$BAJA_SIM_PATH/run.sh" 2>/dev/null; then
+    SIM_VERSION="2.1"
+else
+    SIM_VERSION="2.2"
 fi
 
 # 打印配置
 echo "========================================="
 echo "完整系统启动"
 echo "========================================="
+echo "仿真路径:     $BAJA_SIM_PATH"
+echo "仿真版本:     $SIM_VERSION"
 echo "仿真配置:"
 echo "  场景种子:     $SEED"
 echo "  障碍物数量:   $OBSTACLES"
