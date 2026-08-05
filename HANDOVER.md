@@ -393,13 +393,14 @@ ros2 run tf2_tools view_frames
 
 最近的重要提交：
 ```
-a4353a7 - feat: 添加 run_full_v2.sh 适配 baja_cloud_sim-2.2
-b764324 - feat: 路沿检测增加语义约束 - 解决画地为牢问题
-76d2906 - feat: 添加一键启动脚本
-f9bde91 - fix: 从nodes列表移除cluster_node引用
-1f3e02e - fix: 完全移除voxel相关引用
-61e907c - fix: 移除遗留的use_voxel_analyzer引用
-7bb5f24 - refactor: 清理冗余节点 + 添加perception_mode参数 + surface_2d可视化修复
+eaa0546 - C53: 添加完整的工作总结与交接文档
+9be1e16 - C52: 添加 run_full_v2.sh 适配 baja_cloud_sim-2.2
+496568e - C51: 路沿检测增加语义约束 - 解决画地为牢问题
+6da48c9 - C50: 添加一键启动脚本
+7f9e3dd - C49: 从nodes列表移除cluster_node引用
+65eaaa2 - C48: 完全移除voxel相关引用
+d3b9a48 - C47: 移除遗留的use_voxel_analyzer引用
+8089cb0 - C46: 清理冗余节点 + 添加perception_mode参数 + surface_2d可视化修复
 977c1c2 - C45: C++版surface_detector成为默认 + BajaSimPart集成验证通过
 9c27562 - C44: surface_detector C++移植 + 目标留存 + 路沿接口对齐
 aa0c801 - C43: 颜色统一 + 空帧处理 + 置信度文本显示
