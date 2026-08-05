@@ -62,7 +62,6 @@ def launch_setup(context, *args, **kwargs):
 
     rviz_raw = os.path.join(pkg_share, 'rviz', 'lidar3d_raw.rviz')
     rviz_proc = os.path.join(pkg_share, 'rviz', 'lidar3d_processed.rviz')
-    rviz_voxel = os.path.join(pkg_share, 'rviz', 'lidar3d_voxel.rviz')
     rviz_surface = os.path.join(pkg_share, 'rviz', 'lidar3d_surface_2d.rviz')
 
     # --- filter params ---
@@ -224,12 +223,6 @@ def launch_setup(context, *args, **kwargs):
         parameters=[{'use_sim_time': use_sim_time_val}], output='screen',
         condition=IfCondition(LaunchConfiguration('use_rviz_proc')),
     )
-    rviz_voxel_node = Node(
-        package='rviz2', executable='rviz2', name='rviz2_voxel',
-        arguments=['-d', rviz_voxel],
-        parameters=[{'use_sim_time': use_sim_time_val}], output='screen',
-        condition=voxel_cond,
-    )
     rviz_surface_node = Node(
         package='rviz2', executable='rviz2', name='rviz2_surface',
         arguments=['-d', rviz_surface],
@@ -256,7 +249,7 @@ def launch_setup(context, *args, **kwargs):
     # 2026-08-05: removed voxel_analyzer (redundant with surface_detector)
     nodes.append(surface_cpp_node)
     # 2026-08-05: removed boundary_node (redundant with road_analyzer)
-    nodes.extend([rviz_raw_node, rviz_proc_node, rviz_voxel_node, rviz_surface_node])
+    nodes.extend([rviz_raw_node, rviz_proc_node, rviz_surface_node])
 
     return nodes
 
