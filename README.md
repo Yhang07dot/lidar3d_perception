@@ -191,3 +191,18 @@ ros2 topic hz /cx/lslidar_point_cloud_filtered           # 过滤输出频率
 ros2 topic echo /obstacles/boxes_3d --once              # 3D 分类结果
 ros2 run tf2_ros tf2_echo base_link baja_vehicle/base_link/lidar  # TF 验证
 ```
+
+### 规划路径偏差离线诊断
+
+当仿真出现“规划路径与实际车辆偏差过大”时，先录制包含 `/planned_path`、
+`/ground_truth/odom`、`/obstacle_markers`、`/road_boundary_markers` 的 bag，再运行：
+
+```bash
+source /opt/ros/humble/setup.bash
+python3 tools/analyze_planning_divergence_bag.py \
+  ~/rosbags/<bag目录> \
+  --output /tmp/planning_divergence.md \
+  --json-output /tmp/planning_divergence.json
+```
+
+该工具只定位路径锚点误差、路径跳变与同步感知输入；不修改 Baja planner/follower。

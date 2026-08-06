@@ -260,6 +260,19 @@ y_center(x) = (interpolate(y_left, x) + interpolate(y_right, x)) / 2
 
 ## 8. 运行时验收
 
+### 8.1 规划路径—感知输入离线诊断
+
+偶发的 `/planned_path` 与车辆实际位置偏差不在本工作区直接修改控制器。使用
+`tools/analyze_planning_divergence_bag.py` 对齐 bag 中的 `/planned_path`、
+`/ground_truth/odom`、`/obstacle_markers` 与 `/road_boundary_markers`，输出：
+
+- 路径首点到车辆位置的锚点误差；
+- 车辆到路径最近点误差；
+- 相邻规划路径的最大几何跳变；
+- 每个异常窗口同步的 tall/flat 数量和左右边界点数。
+
+诊断结果用于判断异常是否伴随感知输入跳变；不改变 Baja planner/follower 行为。
+
 启动后应依次验证：
 
 ```bash

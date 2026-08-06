@@ -4,7 +4,7 @@ import numpy as np
 
 from lidar3d_bringup.road_analyzer import (
     _extract_lane_boundaries,
-    _merge_lane_tracks,
+    _merge_live_with_cache,
 )
 
 
@@ -51,15 +51,16 @@ def test_extracts_two_forward_ordered_obstacle_boundaries():
     assert np.all(right[:, 1] < -3.5)
 
 
-def test_merging_cache_keeps_a_single_x_ordered_lane_track():
-    """Deduplicates overlapping cache and live lane samples by x bin."""
+def test_live_samples_override_overlapping_cache_bins():
+    """Keeps live samples and uses cache only to fill missing bins."""
     live = np.asarray([[4.1, 4.0], [4.6, 4.1], [5.1, 4.0]])
     cached = np.asarray([[3.9, 4.0], [4.4, 4.2], [4.9, 4.0]])
 
-    merged = _merge_lane_tracks([live, cached], 0.5, 3)
+    merged = _merge_live_with_cache(live, cached, 0.5, 3)
 
     assert len(merged) == 4
     assert np.all(np.diff(merged[:, 0]) > 0.0)
+    assert np.allclose(merged[1:, 0], [4.1, 4.6, 5.1])
     assert np.allclose(merged[:, 1], 4.0, atol=0.15)
 
 
