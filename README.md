@@ -2,6 +2,9 @@
 
 基于 ROS 2 Humble 的 3D LiDAR 感知 pipeline，支持 **rosbag 回放**、**Gazebo 仿真**、**实车 LiDAR** 三种数据源模式。
 
+复杂感知计算、参数语义、坐标系和方案 A 的规划接口见
+[`PERCEPTION_ALGORITHM.md`](PERCEPTION_ALGORITHM.md)。
+
 ## 启动命令速查
 
 ```bash

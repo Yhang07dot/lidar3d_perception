@@ -143,20 +143,19 @@ obstacle_adapter:
 # ------------------------------------------------------------------------------
 road_analyzer:
   ros__parameters:
-    # 极坐标分bin
-    angular_resolution: 1.0          # 角度分辨率 (度)
-
-    # 连续段判定
-    gap_threshold: 0.8               # 间隙阈值 (m)
-
-    # 平滑
-    smoothing_window: 5              # 移动平均窗口大小
-
-    # ==== 高度突变判据 (2026-08-04) ====
-    # 真实路沿(土坎/路肩)在段终点处有Z跳变，仅点云稀疏的边缘不跳变。
-    # >0 时只接受Z差超过此值的候选，抑制误判。0.0 = 关闭(保持原有行为)
-    # 实车场景(一侧轮胎堆、一侧土坎)建议 0.10-0.15
-    height_diff_threshold: 0.0
+    min_forward: 1.0                 # 忽略车身附近的障碍物 (m)
+    max_forward: 30.0                # 前方道路边界的最大检测距离 (m)
+    min_lateral: 0.75                # 忽略接近车道中心的障碍物 (m)
+    forward_bin_size: 0.5            # 沿车辆前进方向的采样间隔 (m)
+    min_road_width: 3.0              # 左右障碍物构成道路的最小宽度 (m)
+    max_road_width: 12.0             # 左右障碍物构成道路的最大宽度 (m)
+    road_width_tolerance: 1.5        # 相对中位道路宽度的允许变化 (m)
+    max_lateral_step: 1.5            # 相邻 0.5m 采样的最大横向跳变 (m)
+    min_points_per_side: 2           # 单个纵向采样内每侧所需最少障碍点数
+    smooth_window: 5                 # 车道线中值平滑窗口
+    cache_duration_ms: 2000          # 世界坐标缓存时长 (ms)
+    world_frame: "map"               # 缓存参考坐标系
+    publish_rate_hz: 10.0            # 独立于点云帧率的发布频率 (Hz)
 
 
 # ------------------------------------------------------------------------------

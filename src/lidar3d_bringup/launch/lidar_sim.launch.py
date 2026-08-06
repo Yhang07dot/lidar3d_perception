@@ -96,17 +96,13 @@ def launch_setup(context, *args, **kwargs):
         ],
     )
 
-    # Road boundary analyzer: 从 /patchworkpp/ground 极角间隙检测推道路左右边界。
-    # 2026-08-05: 补齐新命令缺失的节点 — 老命令(play_and_viz)在 use_lidar_perception:=true
-    # 时拉起本节点，新命令此前漏掉，导致道路两侧小障碍物/路沿边界看不到。
-    # perception_mode=lidar 时把 /lidar/road_boundary_markers 重定向为 /road_boundary_markers。
     road_remappings = []
     if LaunchConfiguration('perception_mode').perform(context) == 'lidar':
         road_remappings = [('/lidar/road_boundary_markers', '/road_boundary_markers')]
     road_node = Node(
         package='lidar3d_bringup', executable='road_analyzer',
         name='road_analyzer', output='screen',
-        parameters=[params_file, {'use_sim_time': True, 'require_parallel': False}],
+        parameters=[params_file, {'use_sim_time': True}],
         remappings=road_remappings,
     )
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Road analyser — extracts boundaries and centreline from the nonground point cloud only.
+Road analyser — extracts lane-like road boundaries from nonground obstacles.
 
 Subscribes to:
   /patchworkpp/nonground  — obstacles / kerbs / road-edge features
@@ -9,22 +9,20 @@ Publishes:
   /lidar/road_boundary_markers  — LINE_STRIP ×2 (left/right road edges, base_link)
   /lidar/centerline             — Path (road midline, base_link, visualisation only)
 
-Algorithm (single-source polar boundary detection):
-  1. Polar bin (3° per bin) the nonground cloud.
-  2. For each angular bin, take the nearest nonground point as the boundary
-     candidate (this is the inner face of the roadside obstacle / kerb).
-  3. Reject candidates too close to the vehicle centreline (|y| < min_lateral)
-     to keep speed bumps /减速带 out of the boundary set.
-  4. Polar-coordinate smoothing per side → publish smooth LINE_STRIP markers.
-  5. Temporal caching in world frame keeps road edges visible in the near-field
-     LiDAR blind zone.
+Algorithm (single-source longitudinal lane tracking):
+  1. Transform nonground points into base_link and keep only the forward field.
+  2. Divide the road ahead into longitudinal (x-axis) bins.
+  3. In each bin, take the inner faces of the left and right roadside obstacles.
+  4. Retain width-consistent obstacle pairs and reject only abrupt local jumps.
+  5. Smooth and publish two x-ordered LINE_STRIP markers, one per road side.
+  6. Temporal caching in world frame keeps road edges visible in the near-field
+     LiDAR blind zone without reordering the two lane lines.
 
 Key design: does NOT depend on surface_detector or obstacle_adapter classification.
 Only consumes raw patchworkpp nonground.  The assumption is that road-edge obstacles
 are already classified as nonground by patchworkpp, so the ground cloud is not needed.
 """
 
-import math
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -59,144 +57,165 @@ def _pc2_to_xyz(msg: PointCloud2) -> np.ndarray:
     return np.column_stack([points['x'], points['y'], points['z']])
 
 
-# ── Polar binning helpers ────────────────────────────────────────────────────
+# ── Longitudinal lane tracking helpers ───────────────────────────────────────
 
-def _bin_points(xyz: np.ndarray, angular_bins: int,
-                min_range: float, max_range: float):
-    """Polar-bin (N,3) points. Returns arrays indexed by bin.
-
-    Returns:
-      bin_points: list of (N_k,3) arrays, one per angular bin
-    """
-    n = len(xyz)
-    if n == 0:
-        return [np.zeros((0, 3)) for _ in range(angular_bins)]
-
-    x, y, z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
-    dist = np.sqrt(x**2 + y**2)
-    angle = np.arctan2(y, x)  # [-pi, pi]
-
-    mask = (dist >= min_range) & (dist <= max_range)
-    if mask.sum() == 0:
-        return [np.zeros((0, 3)) for _ in range(angular_bins)]
-
-    x, y, z, dist, angle = x[mask], y[mask], z[mask], dist[mask], angle[mask]
-
-    bin_edges = np.linspace(-math.pi, math.pi, angular_bins + 1)
-    bin_indices = np.digitize(angle, bin_edges) - 1
-    bin_indices = np.clip(bin_indices, 0, angular_bins - 1)
-
-    bin_pts = [np.zeros((0, 3)) for _ in range(angular_bins)]
-    for bi in range(angular_bins):
-        m = bin_indices == bi
-        if m.sum() > 0:
-            bin_pts[bi] = np.column_stack([x[m], y[m], z[m]])
-    return bin_pts
+def _empty_points() -> np.ndarray:
+    """Return an empty XY point array with a stable shape."""
+    return np.zeros((0, 2))
 
 
-def _nearest_nonground_per_bin(bin_pts: np.ndarray,
-                                min_range: float = 1.5):
-    """Return the nearest nonground point in the bin beyond min_range.
+def _smooth_lane_track(points: np.ndarray, window: int) -> np.ndarray:
+    """Median-smooth an x-ordered lane track without changing its x values."""
+    if len(points) == 0:
+        return _empty_points()
 
-    This is the inner face of the roadside obstacle / kerb.  Returns
-    (x, y, dist) or None.
-    """
-    n = len(bin_pts)
-    if n < 1:
-        return None
-
-    dist = np.sqrt(bin_pts[:, 0]**2 + bin_pts[:, 1]**2)
-    mask = dist >= min_range
-    if mask.sum() == 0:
-        return None
-
-    best = np.argmin(dist[mask])
-    idx = np.where(mask)[0][best]
-    return float(bin_pts[idx, 0]), float(bin_pts[idx, 1]), float(dist[idx])
-
-
-def _extract_boundaries_nonground(
-    nonground_bins: list,
-    angular_bins: int,
-    min_lateral: float = 0.5,
-    min_range: float = 1.5,
-) -> tuple:
-    """Single-source polar boundary extraction from nonground only.
-
-    For each angular bin the nearest nonground point beyond min_range is taken
-    as the boundary candidate.  Points too close to the vehicle centreline
-    (|y| < min_lateral) are rejected, which removes mid-road objects (speed
-    bumps / 减速带) from the boundary set.
-
-    Returns (left_cands, right_cands) where each is (N,3) with columns
-    [angle, x, y] in sensor frame.
-    """
-    left_cands = []
-    right_cands = []
-
-    for bi in range(angular_bins):
-        ng = _nearest_nonground_per_bin(nonground_bins[bi], min_range)
-        if ng is None:
-            continue
-
-        bx, by = ng[0], ng[1]
-        # Reject mid-road candidates (speed bumps etc.)
-        if abs(by) < min_lateral:
-            continue
-
-        angle = math.atan2(by, bx)
-        if by > 0:
-            left_cands.append([angle, bx, by])
-        else:
-            right_cands.append([angle, bx, by])
-
-    left_arr = np.array(left_cands) if left_cands else np.zeros((0, 3))
-    right_arr = np.array(right_cands) if right_cands else np.zeros((0, 3))
-    return left_arr, right_arr
-
-
-# ── Smoothing ────────────────────────────────────────────────────────────────
-
-def _smooth_boundary_polar(cands: np.ndarray, window: int = 5) -> np.ndarray:
-    """Smooth boundary candidates in polar coordinates.
-
-    Input: (N,3) array with columns [angle, x, y].
-    Output: (N,2) array of smoothed [x, y] sorted by angle.
-    Averaging radius and angle separately preserves radial ordering and
-    prevents a single straight line shortcut across the vehicle.
-    """
-    n = len(cands)
-    if n < window:
-        return cands[:, 1:] if n > 0 else np.zeros((0, 2))
-
-    arr = cands[np.argsort(cands[:, 0])]
-    theta = arr[:, 0]
-    r = np.sqrt(arr[:, 1]**2 + arr[:, 2]**2)
+    ordered = points[np.argsort(points[:, 0])]
+    if len(ordered) < window or window <= 1:
+        return ordered
 
     half = window // 2
-    r_smooth = np.empty_like(r)
-    t_smooth = np.empty_like(theta)
+    smoothed = ordered.copy()
+    for index in range(len(ordered)):
+        start = max(0, index - half)
+        stop = min(len(ordered), index + half + 1)
+        smoothed[index, 1] = np.median(ordered[start:stop, 1])
+    return smoothed
 
-    for i in range(n):
-        lo = max(0, i - half)
-        hi = min(n, i + half + 1)
-        r_smooth[i] = np.mean(r[lo:hi])
-        # mean angle handling wrap around the -pi/pi seam
-        angs = theta[lo:hi]
-        base = angs[len(angs)//2]
-        angs_unwrapped = np.mod(angs - base + math.pi, 2 * math.pi) - math.pi + base
-        t_smooth[i] = np.mean(angs_unwrapped)
 
-    x = r_smooth * np.cos(t_smooth)
-    y = r_smooth * np.sin(t_smooth)
-    return np.column_stack([x, y])
+def _filter_pair_outliers(
+    left: np.ndarray,
+    right: np.ndarray,
+    forward_bin_size: float,
+    max_x_gap: float,
+    max_lateral_step: float,
+) -> tuple:
+    """Keep sparse pair samples while rejecting abrupt local lateral jumps."""
+    if len(left) < 2 or len(right) < 2:
+        return _empty_points(), _empty_points()
+
+    order = np.argsort(left[:, 0])
+    left = left[order]
+    right = right[order]
+
+    accepted = [0]
+    for index in range(1, len(left)):
+        previous = accepted[-1]
+        x_gap = left[index, 0] - left[previous, 0]
+        lateral_scale = max(1.0, x_gap / forward_bin_size)
+        allowed_step = max_lateral_step * lateral_scale
+        left_step = abs(left[index, 1] - left[previous, 1])
+        right_step = abs(right[index, 1] - right[previous, 1])
+        if x_gap > max_x_gap and lateral_scale > 1.0:
+            accepted.append(index)
+        elif left_step <= allowed_step and right_step <= allowed_step:
+            accepted.append(index)
+
+    return left[accepted], right[accepted]
+
+
+def _extract_lane_boundaries(
+    xyz: np.ndarray,
+    min_forward: float,
+    max_forward: float,
+    min_lateral: float,
+    forward_bin_size: float,
+    min_road_width: float,
+    max_road_width: float,
+    width_tolerance: float,
+    max_lateral_step: float,
+    min_points_per_side: int,
+) -> tuple:
+    """
+    Extract paired left/right road-edge candidates from obstacle points.
+
+    The vehicle frame convention is x forward, y left.  A candidate pair is
+    made only when obstacle points exist on both sides of one longitudinal bin.
+    Selecting the innermost obstacle face makes kerbs, barriers, and obstacle
+    walls form the lane boundary while the paired-width test rejects isolated
+    objects inside the drivable corridor.
+    """
+    if len(xyz) == 0:
+        return _empty_points(), _empty_points()
+
+    x = xyz[:, 0]
+    y = xyz[:, 1]
+    finite = np.isfinite(x) & np.isfinite(y)
+    radial_range = np.hypot(x, y)
+    mask = (
+        finite &
+        (x >= min_forward) &
+        (x <= max_forward) &
+        (radial_range <= max_forward)
+    )
+    if not np.any(mask):
+        return _empty_points(), _empty_points()
+
+    x = x[mask]
+    y = y[mask]
+    bin_indices = np.floor((x - min_forward) / forward_bin_size).astype(int)
+
+    left_candidates = []
+    right_candidates = []
+    for bin_index in np.unique(bin_indices):
+        bin_mask = bin_indices == bin_index
+        x_values = x[bin_mask]
+        y_values = y[bin_mask]
+        left_values = y_values[y_values >= min_lateral]
+        right_values = y_values[y_values <= -min_lateral]
+        if (len(left_values) < min_points_per_side or
+                len(right_values) < min_points_per_side):
+            continue
+
+        left_y = float(np.quantile(left_values, 0.10))
+        right_y = float(np.quantile(right_values, 0.90))
+        road_width = left_y - right_y
+        if not min_road_width <= road_width <= max_road_width:
+            continue
+
+        x_position = float(np.median(x_values))
+        left_candidates.append([x_position, left_y])
+        right_candidates.append([x_position, right_y])
+
+    if len(left_candidates) < 2:
+        return _empty_points(), _empty_points()
+
+    left = np.asarray(left_candidates)
+    right = np.asarray(right_candidates)
+    widths = left[:, 1] - right[:, 1]
+    median_width = float(np.median(widths))
+    width_mask = np.abs(widths - median_width) <= width_tolerance
+    left = left[width_mask]
+    right = right[width_mask]
+    return _filter_pair_outliers(
+        left,
+        right,
+        forward_bin_size=forward_bin_size,
+        max_x_gap=forward_bin_size * 2.5,
+        max_lateral_step=max_lateral_step,
+    )
+
+
+def _merge_lane_tracks(points: list, forward_bin_size: float,
+                       smooth_window: int) -> np.ndarray:
+    """Deduplicate live/cache points into one x-ordered, smooth lane track."""
+    nonempty = [track for track in points if len(track) > 0]
+    if not nonempty:
+        return _empty_points()
+
+    merged = np.vstack(nonempty)
+    bin_indices = np.floor(merged[:, 0] / forward_bin_size).astype(int)
+    track = []
+    for bin_index in np.unique(bin_indices):
+        bin_points = merged[bin_indices == bin_index]
+        track.append(np.median(bin_points, axis=0))
+    return _smooth_lane_track(np.asarray(track), smooth_window)
 
 
 # ── Marker building ──────────────────────────────────────────────────────────
 
 def _boundary_to_linestrip(pts: np.ndarray, frame_id: str, ns: str,
                            marker_id: int, now) -> Marker:
-    """Build a LINE_STRIP marker from boundary points."""
+    """Build a forward-ordered LINE_STRIP marker from boundary points."""
     marker = Marker()
     marker.header.frame_id = frame_id
     marker.header.stamp = now
@@ -208,7 +227,7 @@ def _boundary_to_linestrip(pts: np.ndarray, frame_id: str, ns: str,
     marker.color = ColorRGBA(r=0.1, g=0.85, b=1.0, a=1.0)  # cyan
     marker.lifetime.nanosec = 200_000_000
 
-    for p in pts:
+    for p in pts[np.argsort(pts[:, 0])]:
         from geometry_msgs.msg import Point
         pt = Point()
         pt.x = float(p[0])
@@ -222,7 +241,7 @@ def _boundary_to_linestrip(pts: np.ndarray, frame_id: str, ns: str,
 
 def _compute_centerline(left: np.ndarray, right: np.ndarray,
                         frame_id: str, now) -> PathMsg:
-    """Compute centreline as midpoint of matched left-right boundary pairs."""
+    """Compute the centreline from left/right boundaries at common x values."""
     msg = PathMsg()
     msg.header.frame_id = frame_id
     msg.header.stamp = now
@@ -230,34 +249,25 @@ def _compute_centerline(left: np.ndarray, right: np.ndarray,
     if len(left) < 3 or len(right) < 3:
         return msg
 
-    ang_l = np.arctan2(left[:, 1], left[:, 0])
-    ang_r = np.arctan2(right[:, 1], right[:, 0])
-    left_s = left[np.argsort(ang_l)]
-    right_s = right[np.argsort(ang_r)]
-
-    ang_l_s = np.arctan2(left_s[:, 1], left_s[:, 0])
-    ang_r_s = np.arctan2(right_s[:, 1], right_s[:, 0])
-
-    mid_pts = []
-    for i, al in enumerate(ang_l_s):
-        j = np.argmin(np.abs(ang_r_s - al))
-        if abs(ang_r_s[j] - al) < math.radians(5.0):
-            mx = (left_s[i, 0] + right_s[j, 0]) / 2.0
-            my = (left_s[i, 1] + right_s[j, 1]) / 2.0
-            mid_pts.append([mx, my])
-
-    if len(mid_pts) < 3:
+    left_s = left[np.argsort(left[:, 0])]
+    right_s = right[np.argsort(right[:, 0])]
+    start_x = max(left_s[0, 0], right_s[0, 0])
+    stop_x = min(left_s[-1, 0], right_s[-1, 0])
+    if stop_x <= start_x:
         return msg
 
-    mid_arr = np.array(mid_pts)
-    dists = np.sqrt(mid_arr[:, 0]**2 + mid_arr[:, 1]**2)
-    mid_sorted = mid_arr[np.argsort(dists)]
+    count = min(len(left_s), len(right_s))
+    if count < 3:
+        return msg
+    x_values = np.linspace(start_x, stop_x, count)
+    left_y = np.interp(x_values, left_s[:, 0], left_s[:, 1])
+    right_y = np.interp(x_values, right_s[:, 0], right_s[:, 1])
 
-    for p in mid_sorted:
+    for x_value, left_value, right_value in zip(x_values, left_y, right_y):
         ps = PoseStamped()
         ps.header = msg.header
-        ps.pose.position.x = float(p[0])
-        ps.pose.position.y = float(p[1])
+        ps.pose.position.x = float(x_value)
+        ps.pose.position.y = float((left_value + right_value) / 2.0)
         ps.pose.position.z = 0.08
         ps.pose.orientation.w = 1.0
         msg.poses.append(ps)
@@ -303,22 +313,26 @@ def _transform_points(pts: np.ndarray, transform: TransformStamped) -> np.ndarra
 # ── Node ─────────────────────────────────────────────────────────────────────
 
 class RoadAnalyzer(Node):
-    """Single-source road boundary extraction from nonground only."""
+    """Generate paired, forward-facing road boundaries from nonground points."""
 
     def __init__(self):
         super().__init__('road_analyzer')
 
         # ── Parameters ──
-        self.declare_parameter('angular_bins', 120)        # 3°/bin — fewer bins → less zigzag
-        self.declare_parameter('min_lateral', 0.5)         # ignore candidates too close to x-axis (mid-road)
-        self.declare_parameter('min_range', 0.5)
-        self.declare_parameter('max_range', 30.0)
+        self.declare_parameter('min_forward', 1.0)
+        self.declare_parameter('max_forward', 30.0)
+        self.declare_parameter('min_lateral', 0.75)
+        self.declare_parameter('forward_bin_size', 0.5)
+        self.declare_parameter('min_road_width', 3.0)
+        self.declare_parameter('max_road_width', 12.0)
+        self.declare_parameter('road_width_tolerance', 1.5)
+        self.declare_parameter('max_lateral_step', 1.5)
+        self.declare_parameter('min_points_per_side', 2)
         self.declare_parameter('smooth_window', 5)
         self.declare_parameter('log_interval', 30)
-        # 2026-08-06: temporal caching for near-field blind zone persistence
-        self.declare_parameter('cache_duration_ms', 2000)   # keep boundaries 2s after last sighting
-        self.declare_parameter('world_frame', 'map')        # cache in world frame
-        self.declare_parameter('publish_rate_hz', 10.0)     # independent publish rate
+        self.declare_parameter('cache_duration_ms', 2000)
+        self.declare_parameter('world_frame', 'map')
+        self.declare_parameter('publish_rate_hz', 10.0)
 
         # QoS matching patchworkpp (RELIABLE + TRANSIENT_LOCAL)
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
@@ -330,9 +344,6 @@ class RoadAnalyzer(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        # ── Subscriptions ──
-        # 2026-08-06: only subscribe to nonground; ground cloud causes spurious
-        # triangular boundary connections and is not needed when kerbs are nonground.
         self.sub_nonground = self.create_subscription(
             PointCloud2, '/patchworkpp/nonground', self._on_nonground, qos)
 
@@ -348,22 +359,23 @@ class RoadAnalyzer(Node):
 
         # ── State ──
         self._frame_count = 0
+        self._last_logged_frame = -1
         self._last_centerline = None
 
-        # Temporal cache: boundary points stored as (world_x, world_y, side, stamp_ns)
-        self._cache = []   # list of dicts
+        self._cache = []
         self._cache_ns = int(self.get_parameter('cache_duration_ms').value) * 1_000_000
         self._world_frame = self.get_parameter('world_frame').value
 
-        # Latest sensor-frame boundary arrays (set by callbacks, consumed by _publish)
-        self._latest_left_sensor = np.zeros((0, 2))
-        self._latest_right_sensor = np.zeros((0, 2))
+        self._latest_left_base = _empty_points()
+        self._latest_right_base = _empty_points()
         self._latest_source_frame = ''
         self._latest_nonground_xyz = np.zeros((0, 3))
+        self._latest_frame_sequence = 0
+        self._last_cached_frame_sequence = -1
 
         self.get_logger().info(
-            'Road Analyzer ready — single-source (nonground only) '
-            'polar boundary detection + temporal caching')
+            'Road Analyzer ready — nonground longitudinal lane tracking '
+            '+ temporal caching')
 
     # ── TF helpers ──
     def _lookup(self, target: str, source: str):
@@ -374,9 +386,11 @@ class RoadAnalyzer(Node):
 
     # ── Callbacks ──
     def _on_nonground(self, msg: PointCloud2):
+        self._latest_frame_sequence += 1
         self._latest_nonground_xyz = _pc2_to_xyz(msg)
-        if not self._latest_source_frame:
-            self._latest_source_frame = msg.header.frame_id
+        self._latest_source_frame = msg.header.frame_id
+        self._latest_left_base = _empty_points()
+        self._latest_right_base = _empty_points()
         self._try_process()
 
     def _try_process(self):
@@ -388,77 +402,89 @@ class RoadAnalyzer(Node):
     def _process_frame(self):
         self._frame_count += 1
 
-        bins = self.get_parameter('angular_bins').value
-        min_r = self.get_parameter('min_range').value
-        max_r = self.get_parameter('max_range').value
+        min_forward = self.get_parameter('min_forward').value
+        max_forward = self.get_parameter('max_forward').value
+        min_lateral = self.get_parameter('min_lateral').value
+        bin_size = self.get_parameter('forward_bin_size').value
+        min_width = self.get_parameter('min_road_width').value
+        max_width = self.get_parameter('max_road_width').value
+        width_tolerance = self.get_parameter('road_width_tolerance').value
+        max_lateral_step = self.get_parameter('max_lateral_step').value
+        min_points = self.get_parameter('min_points_per_side').value
         win = self.get_parameter('smooth_window').value
         log_int = self.get_parameter('log_interval').value
 
-        # ── Bin nonground only ──
-        nonground_bins = _bin_points(self._latest_nonground_xyz, bins, min_r, max_r)
+        transform = self._lookup('base_link', self._latest_source_frame)
+        if transform is None:
+            self.get_logger().warn(
+                f'TF {self._latest_source_frame}→base_link unavailable',
+                throttle_duration_sec=5.0)
+            return
 
-        # ── Nonground-only extraction ──
-        min_lat = self.get_parameter('min_lateral').value
-        left_cands, right_cands = _extract_boundaries_nonground(
-            nonground_bins, bins, min_lat, min_r)
+        base_xy = _transform_points(self._latest_nonground_xyz[:, :2], transform)
+        base_xyz = np.column_stack([base_xy, self._latest_nonground_xyz[:, 2]])
+        left, right = _extract_lane_boundaries(
+            base_xyz,
+            min_forward,
+            max_forward,
+            min_lateral,
+            bin_size,
+            min_width,
+            max_width,
+            width_tolerance,
+            max_lateral_step,
+            min_points,
+        )
+        left = _smooth_lane_track(left, win)
+        right = _smooth_lane_track(right, win)
 
-        # smooth in polar coordinates to preserve radial ordering
-        left_sm = _smooth_boundary_polar(left_cands, win)
-        right_sm = _smooth_boundary_polar(right_cands, win)
-
-        if len(left_sm) < 3 or len(right_sm) < 3:
+        if len(left) < 3 or len(right) < 3:
             if self._frame_count % log_int == 0:
                 self.get_logger().warn(
-                    f'Frame {self._frame_count}: insufficient boundary points '
-                    f'(left={len(left_sm)}, right={len(right_sm)})',
+                    f'Frame {self._frame_count}: insufficient lane pairs '
+                    f'(left={len(left)}, right={len(right)})',
                     throttle_duration_sec=3.0)
             return
 
-        # Store for later publish (with TF transform + temporal caching)
-        self._latest_left_sensor = left_sm
-        self._latest_right_sensor = right_sm
+        self._latest_left_base = left
+        self._latest_right_base = right
 
     # ── Publish ──
     def _publish(self):
-        """Transform latest boundaries to base_link, merge with cache, publish."""
+        """Merge current and cached lane tracks, then publish them in base_link."""
         now = self.get_clock().now()
         now_ns = now.nanoseconds
         now_msg = now.to_msg()
         log_int = self.get_parameter('log_interval').value
+        bin_size = self.get_parameter('forward_bin_size').value
+        smooth_window = self.get_parameter('smooth_window').value
+        min_forward = self.get_parameter('min_forward').value
+        max_forward = self.get_parameter('max_forward').value
 
-        source_frame = self._latest_source_frame
-        if not source_frame:
-            return
+        left_live = self._latest_left_base
+        right_live = self._latest_right_base
+        is_new_frame = (
+            self._latest_frame_sequence != self._last_cached_frame_sequence
+        )
+        if is_new_frame and (len(left_live) > 0 or len(right_live) > 0):
+            transform = self._lookup(self._world_frame, 'base_link')
+            if transform is not None:
+                for side, track in (('left', left_live), ('right', right_live)):
+                    for px, py in track:
+                        wx, wy, _ = _apply_transform(transform, px, py, 0.0)
+                        self._cache.append({
+                            'wx': wx,
+                            'wy': wy,
+                            'side': side,
+                            'stamp_ns': now_ns,
+                        })
+                self._last_cached_frame_sequence = self._latest_frame_sequence
+        elif is_new_frame:
+            self._last_cached_frame_sequence = self._latest_frame_sequence
 
-        # ── TF: sensor → base_link ──
-        t_s2b = self._lookup('base_link', source_frame)
-        if t_s2b is None:
-            self.get_logger().warn(
-                f'TF {source_frame}→base_link unavailable',
-                throttle_duration_sec=5.0)
-            return
-
-        left_bl = _transform_points(self._latest_left_sensor, t_s2b)
-        right_bl = _transform_points(self._latest_right_sensor, t_s2b)
-
-        # ── Update temporal cache (world-frame storage) ──
-        t_b2w = self._lookup(self._world_frame, 'base_link')
-        if t_b2w is not None and len(left_bl) > 0:
-            for px, py in left_bl:
-                wx, wy, _ = _apply_transform(t_b2w, px, py, 0.0)
-                self._cache.append({
-                    'wx': wx, 'wy': wy, 'side': 'left', 'stamp_ns': now_ns})
-        if t_b2w is not None and len(right_bl) > 0:
-            for px, py in right_bl:
-                wx, wy, _ = _apply_transform(t_b2w, px, py, 0.0)
-                self._cache.append({
-                    'wx': wx, 'wy': wy, 'side': 'right', 'stamp_ns': now_ns})
-
-        # ── Expire old cache entries ──
         self._cache = [e for e in self._cache
                        if now_ns - e['stamp_ns'] <= self._cache_ns]
 
-        # ── Re-project cached world points back to current base_link ──
         t_w2b = self._lookup('base_link', self._world_frame)
         cached_left = []
         cached_right = []
@@ -470,23 +496,23 @@ class RoadAnalyzer(Node):
                 else:
                     cached_right.append([bx, by])
 
-        cached_left = np.array(cached_left) if cached_left else np.zeros((0, 2))
-        cached_right = np.array(cached_right) if cached_right else np.zeros((0, 2))
+        cached_left = np.asarray(cached_left) if cached_left else _empty_points()
+        cached_right = np.asarray(cached_right) if cached_right else _empty_points()
+        if len(cached_left) > 0:
+            cached_left = cached_left[
+                (cached_left[:, 0] >= min_forward) &
+                (cached_left[:, 0] <= max_forward)
+            ]
+        if len(cached_right) > 0:
+            cached_right = cached_right[
+                (cached_right[:, 0] >= min_forward) &
+                (cached_right[:, 0] <= max_forward)
+            ]
 
-        # Merge live + cached
-        if len(left_bl) > 0 and len(cached_left) > 0:
-            merged_left = np.vstack([left_bl, cached_left])
-        elif len(left_bl) > 0:
-            merged_left = left_bl
-        else:
-            merged_left = cached_left
-
-        if len(right_bl) > 0 and len(cached_right) > 0:
-            merged_right = np.vstack([right_bl, cached_right])
-        elif len(right_bl) > 0:
-            merged_right = right_bl
-        else:
-            merged_right = cached_right
+        merged_left = _merge_lane_tracks(
+            [left_live, cached_left], bin_size, smooth_window)
+        merged_right = _merge_lane_tracks(
+            [right_live, cached_right], bin_size, smooth_window)
 
         # ── Publish boundary markers ──
         markers = MarkerArray()
@@ -501,15 +527,17 @@ class RoadAnalyzer(Node):
         if len(centerline.poses) >= 3:
             self._last_centerline = centerline
             self.pub_centerline.publish(centerline)
-        elif self._last_centerline is not None:
-            self._last_centerline.header.stamp = now_msg
-            self.pub_centerline.publish(self._last_centerline)
+        else:
+            self._last_centerline = None
+            self.pub_centerline.publish(centerline)
 
-        # ── Log ──
-        if self._frame_count % log_int == 0:
+        if (self._frame_count > 0 and
+                self._frame_count % log_int == 0 and
+                self._last_logged_frame != self._frame_count):
+            self._last_logged_frame = self._frame_count
             self.get_logger().info(
                 f'Frame {self._frame_count}: '
-                f'live left={len(left_bl)} right={len(right_bl)}, '
+                f'live left={len(left_live)} right={len(right_live)}, '
                 f'cached left={len(cached_left)} right={len(cached_right)}, '
                 f'centreline={len(centerline.poses)}pts')
 
