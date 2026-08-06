@@ -28,6 +28,26 @@ ros2 launch lidar3d_bringup play_and_viz.launch.py enable_ground_seg:=false
 
 ## 数据流
 
+### 当前仿真感知链（`lidar_sim.launch.py`）
+
+```text
+/lidar/points
+  → pointcloud_filter → /cx/lslidar_point_cloud_filtered
+  → Patchwork++ → /patchworkpp/nonground
+  → surface_detector → /obstacles/boxes_3d_surface
+  → obstacle_adapter → /obstacle_markers
+
+/patchworkpp/nonground
+  → road_analyzer → /road_boundary_markers、/lidar/centerline
+```
+
+- `obstacle_adapter` 将高置信 `obstacle_H...` 转为地图系静态 `tall` Track；Track 在
+  空帧、短暂误分类和近场盲区中持续发布，车辆通过后才释放。
+- `road_analyzer` 独立提取左右道路边界。当前帧可靠边界优先，地图缓存只补缺失 bin，
+  从而避免避障姿态变化把历史直线段和当前边界混合成锯齿。
+- 详细的坐标变换、置信度门槛、Track 生命周期和边界连续性规则见
+  [`PERCEPTION_ALGORITHM.md`](PERCEPTION_ALGORITHM.md)。
+
 ### 2D 链路（默认，兼容旧版）
 
 ```text
@@ -77,8 +97,8 @@ ros2 launch lidar3d_bringup play_and_viz.launch.py enable_ground_seg:=false
 | `cluster_analyzer` | `cluster_analyzer` | **PCA 链路**: PCA特征+4类规则+时序追踪+置信度 |
 | `voxel_analyzer` | `voxel_analyzer` | **体素链路**: 多分辨率网格+几何特征+体素聚类 |
 | `cluster_bbox` | `cluster_bbox` | 2D 包围盒生成 |
-| `obstacle_adapter` | `obstacle_adapter` | TF 变换+类型透传 → `/obstacle_markers` |
-| `road_analyzer` | `road_analyzer` | 路沿检测+中心线(调试) |
+| `obstacle_adapter` | `obstacle_adapter` | 语义适配+地图系静态 `tall` Track → `/obstacle_markers` |
+| `road_analyzer` | `road_analyzer` | 左右道路边界稳定融合+中心线(调试) |
 | `tf_publisher` | `tf_publisher` | rosbag 模式 TF 发布 |
 
 ## 全部启动参数

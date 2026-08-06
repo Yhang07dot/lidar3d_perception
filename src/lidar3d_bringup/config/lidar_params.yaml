@@ -124,18 +124,17 @@ voxel_analyzer:
 # ------------------------------------------------------------------------------
 obstacle_adapter:
   ros__parameters:
-    # Marker生命周期
-    marker_lifetime_ms: 400          # 标记存活时间 (毫秒)
-
-    # ==== 目标留存 (2026-08-04) ====
-    # frenet_planner 是状态覆盖式(整体替换障碍物列表)且每100ms独立规划，
-    # 感知抖动/遮挡的瞬时空帧会让它丢失全部障碍物。这里缓存障碍物一段时间，
-    # 并以 world 系存储、发布时反算回 base_link，使车辆前进时缓存障碍物的
-    # 相对位置自动正确后退（而非"粘"在原地）。
-    obstacle_memory_ms: 500          # 缓存保留时长(ms). ↑=遮挡容忍强但幽灵久, ↓=反应快
-    enable_dead_reckoning: true      # 位姿推算(需 world→base_link TF, 实车定位模块提供)
-    world_frame: "map"               # 推算参考系
-    publish_rate_hz: 20.0            # 发布频率(Hz), 独立于感知帧率保证输出连续
+    # 静态 tall Track：仅在 map 系中长期保存不可通过障碍物。
+    # flat_ground 只发布当前帧，不做时间缓存。
+    world_frame: "map"
+    road_boundary_topic: "/road_boundary_markers"
+    boundary_exclusion_distance_m: 1.0  # 单侧边界可用时的外侧排除缓冲
+    track_create_confidence: 0.80    # 单帧达到该 c 值立即建 Track
+    track_update_confidence: 0.60    # 已有 Track 的位置/尺寸更新门槛
+    track_association_distance_m: 1.5  # 地图系二维最近邻关联距离
+    track_position_alpha: 0.30       # 地图坐标观测的低通更新系数
+    track_scale_alpha: 0.30          # CUBE 尺寸的低通更新系数
+    track_release_behind_m: 2.0      # 障碍物位于车后该距离才删除
 
 
 # ------------------------------------------------------------------------------
@@ -155,6 +154,7 @@ road_analyzer:
     smooth_window: 5                 # 车道线中值平滑窗口
     cache_duration_ms: 2000          # 世界坐标缓存时长 (ms)
     world_frame: "map"               # 缓存参考坐标系
+    world_continuity_threshold_m: 0.8  # live 边界相对地图缓存的最大允许跳变
     publish_rate_hz: 10.0            # 独立于点云帧率的发布频率 (Hz)
 
 

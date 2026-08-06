@@ -195,20 +195,39 @@ def _extract_lane_boundaries(
     )
 
 
-def _merge_lane_tracks(points: list, forward_bin_size: float,
-                       smooth_window: int) -> np.ndarray:
-    """Deduplicate live/cache points into one x-ordered, smooth lane track."""
-    nonempty = [track for track in points if len(track) > 0]
-    if not nonempty:
+def _merge_live_with_cache(live: np.ndarray, cached: np.ndarray,
+                           forward_bin_size: float,
+                           smooth_window: int) -> np.ndarray:
+    """Use live boundary samples first and fill only missing bins from cache."""
+    if len(live) == 0 and len(cached) == 0:
         return _empty_points()
 
-    merged = np.vstack(nonempty)
-    bin_indices = np.floor(merged[:, 0] / forward_bin_size).astype(int)
-    track = []
-    for bin_index in np.unique(bin_indices):
-        bin_points = merged[bin_indices == bin_index]
-        track.append(np.median(bin_points, axis=0))
+    def bin_medians(track: np.ndarray) -> dict:
+        if len(track) == 0:
+            return {}
+        indices = np.floor(track[:, 0] / forward_bin_size).astype(int)
+        return {
+            index: np.median(track[indices == index], axis=0)
+            for index in np.unique(indices)
+        }
+
+    live_bins = bin_medians(live)
+    cached_bins = bin_medians(cached)
+    track = [
+        live_bins[index] if index in live_bins else cached_bins[index]
+        for index in sorted(set(live_bins) | set(cached_bins))
+    ]
     return _smooth_lane_track(np.asarray(track), smooth_window)
+
+
+def _median_nearest_distance(points: np.ndarray,
+                              reference: np.ndarray) -> float:
+    """Return a map-frame overlap consistency metric for one boundary side."""
+    if len(points) == 0 or len(reference) == 0:
+        return 0.0
+    deltas = points[:, np.newaxis, :] - reference[np.newaxis, :, :]
+    distances = np.hypot(deltas[:, :, 0], deltas[:, :, 1])
+    return float(np.median(np.min(distances, axis=1)))
 
 
 # ── Marker building ──────────────────────────────────────────────────────────
@@ -332,6 +351,7 @@ class RoadAnalyzer(Node):
         self.declare_parameter('log_interval', 30)
         self.declare_parameter('cache_duration_ms', 2000)
         self.declare_parameter('world_frame', 'map')
+        self.declare_parameter('world_continuity_threshold_m', 0.8)
         self.declare_parameter('publish_rate_hz', 10.0)
 
         # QoS matching patchworkpp (RELIABLE + TRANSIENT_LOCAL)
@@ -365,6 +385,8 @@ class RoadAnalyzer(Node):
         self._cache = []
         self._cache_ns = int(self.get_parameter('cache_duration_ms').value) * 1_000_000
         self._world_frame = self.get_parameter('world_frame').value
+        self._world_continuity_threshold = float(
+            self.get_parameter('world_continuity_threshold_m').value)
 
         self._latest_left_base = _empty_points()
         self._latest_right_base = _empty_points()
@@ -372,10 +394,11 @@ class RoadAnalyzer(Node):
         self._latest_nonground_xyz = np.zeros((0, 3))
         self._latest_frame_sequence = 0
         self._last_cached_frame_sequence = -1
+        self._latest_live_accepted = False
 
         self.get_logger().info(
-            'Road Analyzer ready — nonground longitudinal lane tracking '
-            '+ temporal caching')
+            'Road Analyzer ready — live-priority lane tracking '
+            '+ map-frame cache fill')
 
     # ── TF helpers ──
     def _lookup(self, target: str, source: str):
@@ -451,7 +474,7 @@ class RoadAnalyzer(Node):
 
     # ── Publish ──
     def _publish(self):
-        """Merge current and cached lane tracks, then publish them in base_link."""
+        """Publish accepted live boundaries with map-cache hole filling."""
         now = self.get_clock().now()
         now_ns = now.nanoseconds
         now_msg = now.to_msg()
@@ -466,24 +489,61 @@ class RoadAnalyzer(Node):
         is_new_frame = (
             self._latest_frame_sequence != self._last_cached_frame_sequence
         )
-        if is_new_frame and (len(left_live) > 0 or len(right_live) > 0):
-            transform = self._lookup(self._world_frame, 'base_link')
-            if transform is not None:
-                for side, track in (('left', left_live), ('right', right_live)):
-                    for px, py in track:
-                        wx, wy, _ = _apply_transform(transform, px, py, 0.0)
-                        self._cache.append({
-                            'wx': wx,
-                            'wy': wy,
-                            'side': side,
-                            'stamp_ns': now_ns,
-                        })
-                self._last_cached_frame_sequence = self._latest_frame_sequence
-        elif is_new_frame:
-            self._last_cached_frame_sequence = self._latest_frame_sequence
-
         self._cache = [e for e in self._cache
                        if now_ns - e['stamp_ns'] <= self._cache_ns]
+
+        cached_left_world = np.asarray([
+            [entry['wx'], entry['wy']]
+            for entry in self._cache if entry['side'] == 'left'
+        ])
+        cached_right_world = np.asarray([
+            [entry['wx'], entry['wy']
+            ] for entry in self._cache if entry['side'] == 'right'
+        ])
+        if len(cached_left_world) == 0:
+            cached_left_world = _empty_points()
+        if len(cached_right_world) == 0:
+            cached_right_world = _empty_points()
+
+        if is_new_frame:
+            self._latest_live_accepted = False
+            if len(left_live) > 0 and len(right_live) > 0:
+                transform = self._lookup(self._world_frame, 'base_link')
+                if transform is not None:
+                    left_world = _transform_points(left_live, transform)
+                    right_world = _transform_points(right_live, transform)
+                    left_jump = _median_nearest_distance(
+                        left_world, cached_left_world)
+                    right_jump = _median_nearest_distance(
+                        right_world, cached_right_world)
+                    left_valid = (
+                        len(cached_left_world) < 3
+                        or left_jump <= self._world_continuity_threshold
+                    )
+                    right_valid = (
+                        len(cached_right_world) < 3
+                        or right_jump <= self._world_continuity_threshold
+                    )
+                    self._latest_live_accepted = left_valid and right_valid
+                    if self._latest_live_accepted:
+                        for side, track in (('left', left_world), ('right', right_world)):
+                            for wx, wy in track:
+                                self._cache.append({
+                                    'wx': wx,
+                                    'wy': wy,
+                                    'side': side,
+                                    'stamp_ns': now_ns,
+                                })
+                    elif self._frame_count % log_int == 0:
+                        self.get_logger().warn(
+                            f'Frame {self._frame_count}: rejected live boundaries '
+                            f'(map jump left={left_jump:.2f}m right={right_jump:.2f}m)',
+                            throttle_duration_sec=2.0)
+            self._last_cached_frame_sequence = self._latest_frame_sequence
+
+        if not self._latest_live_accepted:
+            left_live = _empty_points()
+            right_live = _empty_points()
 
         t_w2b = self._lookup('base_link', self._world_frame)
         cached_left = []
@@ -509,10 +569,10 @@ class RoadAnalyzer(Node):
                 (cached_right[:, 0] <= max_forward)
             ]
 
-        merged_left = _merge_lane_tracks(
-            [left_live, cached_left], bin_size, smooth_window)
-        merged_right = _merge_lane_tracks(
-            [right_live, cached_right], bin_size, smooth_window)
+        merged_left = _merge_live_with_cache(
+            left_live, cached_left, bin_size, smooth_window)
+        merged_right = _merge_live_with_cache(
+            right_live, cached_right, bin_size, smooth_window)
 
         # ── Publish boundary markers ──
         markers = MarkerArray()
@@ -539,6 +599,7 @@ class RoadAnalyzer(Node):
                 f'Frame {self._frame_count}: '
                 f'live left={len(left_live)} right={len(right_live)}, '
                 f'cached left={len(cached_left)} right={len(cached_right)}, '
+                f'live_accepted={self._latest_live_accepted}, '
                 f'centreline={len(centerline.poses)}pts')
 
 

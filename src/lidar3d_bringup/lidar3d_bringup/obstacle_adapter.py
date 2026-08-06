@@ -1,255 +1,452 @@
 #!/usr/bin/env python3
-"""
-Obstacle adapter: classify + transform + republish for planning/control.
+"""Adapt surface classifications into stable planning obstacles.
 
-Subscribes to /obstacles/boxes_3d_surface (MarkerArray from surface_detector).
-Simplifies 4-class terrain classification to 2 obstacle types for control:
-  - "tall"        — impassable obstacles requiring avoidance
-  - "flat_ground" — passable terrain (slow down if needed)
+The adapter publishes the existing two-class planning interface:
 
-Transforms to base_link via TF and publishes to /obstacle_markers.
+* ``tall``: static, impassable obstacle tracked in ``world_frame``.
+* ``flat_ground``: passable terrain from the current perception frame only.
 
-Parameters:
-  source_frame  — frame of incoming markers (default: 'laser_link')
-  target_frame  — frame to transform markers into (default: 'base_link')
-
-Changelog:
-  2026-08-05: Simplified to 2-class output (tall/flat_ground) for control.
-  2026-07-29: source_frame/target_frame made configurable for sim mode.
+Static tall tracks are stored in the map frame and reprojected into
+``target_frame`` for every input frame. They are removed only after the
+vehicle has passed them, never because the LiDAR temporarily returns no points.
 """
 
+from dataclasses import dataclass
 import math
+import re
+from typing import Dict, List, Optional, Tuple
+
 import rclpy
-from rclpy.node import Node
-from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import TransformStamped
+from rclpy.node import Node
 from tf2_ros import Buffer, TransformListener
+from visualization_msgs.msg import Marker, MarkerArray
 
 
-# 2-class color mapping for control interface (2026-08-05)
 TYPE_COLORS = {
-    'tall': (1.0, 0.0, 0.0, 0.7),          # 红色 - 不可通过，需绕行
-    'flat_ground': (0.0, 0.8, 0.0, 0.5),   # 绿色 - 可通过，减速
+    'tall': (1.0, 0.0, 0.0, 0.7),
+    'flat_ground': (0.0, 0.8, 0.0, 0.5),
 }
+
+CONFIDENCE_PATTERN = re.compile(r'(?:^|\s)c=([0-9]+(?:\.[0-9]+)?)\b')
+
+
+@dataclass
+class StaticTallTrack:
+    """A static tall obstacle represented in the map frame."""
+
+    track_id: int
+    world_xyz: Tuple[float, float, float]
+    scale_xyz: Tuple[float, float, float]
+    hit_count: int
+    last_observation_ns: int
 
 
 def simplify_classification(surface_ns: str) -> str:
-    """
-    Map 5-class surface_detector output to 2-class control interface.
-
-    Input (from surface_detector C++):
-      - "obstacle"       → tall (impassable, avoid)
-      - "passable_low"   → flat_ground (passable)
-      - "passable_high"  → flat_ground (passable, slow)
-      - "unknown"        → flat_ground (conservative: treat as passable)
-
-    Returns: "tall" | "flat_ground"
-    """
-    if surface_ns == "obstacle":
-        return "tall"
-    elif surface_ns in ("passable_low", "passable_high", "unknown"):
-        return "flat_ground"
-    else:
-        # Unknown label from upstream → default to flat_ground (conservative)
-        return "flat_ground"
+    """Map the four surface-detector classes to the control interface."""
+    if surface_ns == 'obstacle':
+        return 'tall'
+    return 'flat_ground'
 
 
 class ObstacleAdapter(Node):
-    """Classify obstacles and republish for planning/control."""
+    """Publish current flat terrain and map-frame static tall tracks."""
 
     def __init__(self):
         super().__init__('obstacle_adapter')
 
-        # 2026-07-29: source/target frame now configurable for sim vs rosbag modes
         self.declare_parameter('source_frame', 'laser_link')
         self.declare_parameter('target_frame', 'base_link')
-        self.declare_parameter('input_topic', '/obstacles/boxes')  # 2026-07-29: switch 2D/3D pipeline
-        self.declare_parameter('passthrough', False)               # 2026-07-29: preserve 3D pipeline classification
+        self.declare_parameter('input_topic', '/obstacles/boxes')
+        self.declare_parameter('passthrough', False)
+        self.declare_parameter('world_frame', 'map')
+        self.declare_parameter('road_boundary_topic', '/road_boundary_markers')
+        self.declare_parameter('boundary_exclusion_distance_m', 1.0)
+        self.declare_parameter('track_create_confidence', 0.80)
+        self.declare_parameter('track_update_confidence', 0.60)
+        self.declare_parameter('track_association_distance_m', 1.5)
+        self.declare_parameter('track_position_alpha', 0.30)
+        self.declare_parameter('track_scale_alpha', 0.30)
+        self.declare_parameter('track_release_behind_m', 2.0)
+
         self.source_frame = self.get_parameter('source_frame').value
         self.target_frame = self.get_parameter('target_frame').value
         self.input_topic = self.get_parameter('input_topic').value
         self.passthrough = self.get_parameter('passthrough').value
+        self.world_frame = self.get_parameter('world_frame').value
+        self.road_boundary_topic = self.get_parameter('road_boundary_topic').value
+        self.boundary_exclusion_distance = float(
+            self.get_parameter('boundary_exclusion_distance_m').value)
+        self.create_confidence = float(
+            self.get_parameter('track_create_confidence').value)
+        self.update_confidence = float(
+            self.get_parameter('track_update_confidence').value)
+        self.association_distance = float(
+            self.get_parameter('track_association_distance_m').value)
+        self.position_alpha = float(
+            self.get_parameter('track_position_alpha').value)
+        self.scale_alpha = float(self.get_parameter('track_scale_alpha').value)
+        self.release_behind = float(
+            self.get_parameter('track_release_behind_m').value)
 
-        # TF for source_frame → target_frame transform
+        if not 0.0 <= self.update_confidence <= self.create_confidence <= 1.0:
+            raise ValueError(
+                'Expected 0 <= track_update_confidence '
+                '<= track_create_confidence <= 1')
+        if self.association_distance <= 0.0:
+            raise ValueError('track_association_distance_m must be positive')
+        if self.boundary_exclusion_distance < 0.0:
+            raise ValueError('boundary_exclusion_distance_m must be non-negative')
+        if not 0.0 < self.position_alpha <= 1.0:
+            raise ValueError('track_position_alpha must be in (0, 1]')
+        if not 0.0 < self.scale_alpha <= 1.0:
+            raise ValueError('track_scale_alpha must be in (0, 1]')
+        if self.release_behind < 0.0:
+            raise ValueError('track_release_behind_m must be non-negative')
+
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
+        self._tracks: Dict[int, StaticTallTrack] = {}
+        self._boundary_lines_world: Dict[str, List[Tuple[float, float]]] = {}
+        self._next_track_id = 1
+        self._frame_count = 0
 
-        # ==== 目标留存 (2026-08-04) ====
-        # frenet_planner 是状态覆盖式(self.obstacles = obstacles 整体替换)且每
-        # 100ms 独立规划，感知抖动/遮挡时瞬时空帧会让它丢失全部障碍物。
-        # 这里缓存障碍物一段时间，并以 world 系存储、发布时反算回 base_link，
-        # 使车辆前进时缓存障碍物的相对位置自动正确后退（而非"粘"在原地）。
-        self.declare_parameter('obstacle_memory_ms', 500)      # 缓存保留时长(ms)
-        self.declare_parameter('enable_dead_reckoning', True)  # 位姿推算(需 world→base_link TF)
-        self.declare_parameter('world_frame', 'map')           # 推算参考系
-        self.declare_parameter('publish_rate_hz', 20.0)        # 发布频率(独立于感知帧率)
-        self.memory_ns = int(self.get_parameter('obstacle_memory_ms').value) * 1_000_000
-        self.dead_reckoning = self.get_parameter('enable_dead_reckoning').value
-        self.world_frame = self.get_parameter('world_frame').value
-
-        # 缓存: marker id → {world_xyz|base_xyz, scale, label, stamp_ns, has_world}
-        self._cache = {}
-
-        # Subscribe to our obstacle boxes (topic switchable via input_topic param)
         self.sub = self.create_subscription(
             MarkerArray,
             self.input_topic,
             self.callback,
             10,
         )
-
-        # Publish in planning/control format
-        self.pub = self.create_publisher(
+        self.boundary_sub = self.create_subscription(
             MarkerArray,
-            '/obstacle_markers',
+            self.road_boundary_topic,
+            self._on_road_boundaries,
             10,
         )
-
-        # 定时发布: 即使感知无输出也维持缓存障碍物的连续发布
-        rate = float(self.get_parameter('publish_rate_hz').value)
-        self.timer = self.create_timer(1.0 / rate, self._publish_cached)
-
-        self._frame_count = 0
-        self._log_interval = 10
+        self.pub = self.create_publisher(MarkerArray, '/obstacle_markers', 10)
 
         self.get_logger().info(
             f'Obstacle Adapter ready — {self.input_topic} → /obstacle_markers '
-            f'(TF: {self.source_frame} → {self.target_frame}, '
-            f'memory={self.memory_ns // 1_000_000}ms, '
-            f'dead_reckoning={self.dead_reckoning})'
-        )
+            f'(static tall tracks in {self.world_frame}; '
+            f'create c>={self.create_confidence:.2f}, '
+            f'update c>={self.update_confidence:.2f}, '
+            f'boundary exclusion={self.boundary_exclusion_distance:.2f}m, '
+            f'release x<-{self.release_behind:.2f}m)')
 
-    def _lookup(self, target: str, source: str):
-        """TF lookup helper. Returns TransformStamped or None."""
+    def _lookup(self, target: str, source: str) -> Optional[TransformStamped]:
         try:
             return self.tf_buffer.lookup_transform(target, source, rclpy.time.Time())
         except Exception:
             return None
 
     @staticmethod
-    def _apply_transform(t: TransformStamped, px: float, py: float, pz: float):
-        """Rotate by the transform's quaternion, then translate."""
-        tr = t.transform.translation
-        q = t.transform.rotation
-        qw, qx, qy, qz = q.w, q.x, q.y, q.z
-        # p' = p + 2*cross(q.xyz, cross(q.xyz, p) + q.w*p)
-        cx = 2.0 * (qy * pz - qz * py)
-        cy = 2.0 * (qz * px - qx * pz)
-        cz = 2.0 * (qx * py - qy * px)
-        rx = px + qw * cx + (qy * cz - qz * cy)
-        ry = py + qw * cy + (qz * cx - qx * cz)
-        rz = pz + qw * cz + (qx * cy - qy * cx)
-        return rx + tr.x, ry + tr.y, rz + tr.z
+    def _apply_transform(
+            transform: TransformStamped,
+            point_x: float,
+            point_y: float,
+            point_z: float) -> Tuple[float, float, float]:
+        translation = transform.transform.translation
+        rotation = transform.transform.rotation
+        quaternion_w = rotation.w
+        quaternion_x = rotation.x
+        quaternion_y = rotation.y
+        quaternion_z = rotation.z
+
+        cross_x = 2.0 * (quaternion_y * point_z - quaternion_z * point_y)
+        cross_y = 2.0 * (quaternion_z * point_x - quaternion_x * point_z)
+        cross_z = 2.0 * (quaternion_x * point_y - quaternion_y * point_x)
+        rotated_x = point_x + quaternion_w * cross_x + (
+            quaternion_y * cross_z - quaternion_z * cross_y)
+        rotated_y = point_y + quaternion_w * cross_y + (
+            quaternion_z * cross_x - quaternion_x * cross_z)
+        rotated_z = point_z + quaternion_w * cross_z + (
+            quaternion_x * cross_y - quaternion_y * cross_x)
+        return (
+            rotated_x + translation.x,
+            rotated_y + translation.y,
+            rotated_z + translation.z,
+        )
+
+    @staticmethod
+    def _confidence(marker: Marker) -> Optional[float]:
+        match = CONFIDENCE_PATTERN.search(marker.text)
+        return float(match.group(1)) if match else None
+
+    @staticmethod
+    def _blend(
+            previous: Tuple[float, float, float],
+            observed: Tuple[float, float, float],
+            alpha: float) -> Tuple[float, float, float]:
+        return tuple(
+            (1.0 - alpha) * previous_value + alpha * observed_value
+            for previous_value, observed_value in zip(previous, observed))
+
+    def _nearest_track(
+            self, world_xyz: Tuple[float, float, float]) -> Optional[StaticTallTrack]:
+        nearest = None
+        nearest_distance = self.association_distance
+        for track in self._tracks.values():
+            distance = math.hypot(
+                track.world_xyz[0] - world_xyz[0],
+                track.world_xyz[1] - world_xyz[1])
+            if distance <= nearest_distance:
+                nearest = track
+                nearest_distance = distance
+        return nearest
+
+    @staticmethod
+    def _has_obstacle_semantic(marker: Marker) -> bool:
+        return marker.text.startswith('obstacle_')
+
+    def _boundary_y_at_x(
+            self,
+            side: str,
+            base_x: float,
+            base_from_world: TransformStamped) -> Optional[float]:
+        line = self._boundary_lines_world.get(side)
+        if not line:
+            return None
+
+        y_values = []
+        for index in range(len(line) - 1):
+            start_x, start_y, _ = self._apply_transform(
+                base_from_world, line[index][0], line[index][1], 0.0)
+            end_x, end_y, _ = self._apply_transform(
+                base_from_world, line[index + 1][0], line[index + 1][1], 0.0)
+            delta_x = end_x - start_x
+            if abs(delta_x) < 1e-6:
+                continue
+            if not min(start_x, end_x) <= base_x <= max(start_x, end_x):
+                continue
+            ratio = (base_x - start_x) / delta_x
+            y_values.append(start_y + ratio * (end_y - start_y))
+
+        if not y_values:
+            return None
+        return min(y_values) if side == 'road_left' else max(y_values)
+
+    def _is_roadside_object(
+            self,
+            world_xyz: Tuple[float, float, float],
+            base_from_world: TransformStamped) -> bool:
+        base_x, base_y, _ = self._apply_transform(base_from_world, *world_xyz)
+        left_y = self._boundary_y_at_x('road_left', base_x, base_from_world)
+        right_y = self._boundary_y_at_x('road_right', base_x, base_from_world)
+
+        if left_y is not None and right_y is not None:
+            if left_y <= right_y:
+                return False
+            return not right_y < base_y < left_y
+
+        if left_y is not None:
+            return (
+                base_y >= left_y
+                and base_y - left_y <= self.boundary_exclusion_distance
+            )
+        if right_y is not None:
+            return (
+                base_y <= right_y
+                and right_y - base_y <= self.boundary_exclusion_distance
+            )
+        return False
+
+    def _on_road_boundaries(self, msg: MarkerArray) -> None:
+        updated_lines: Dict[str, List[Tuple[float, float]]] = {}
+        for marker in msg.markers:
+            if marker.action != Marker.ADD or marker.type != Marker.LINE_STRIP:
+                continue
+            if marker.ns not in ('road_left', 'road_right') or len(marker.points) < 2:
+                continue
+
+            source_frame = marker.header.frame_id or self.target_frame
+            if source_frame == self.world_frame:
+                world_from_source = None
+            else:
+                world_from_source = self._lookup(self.world_frame, source_frame)
+                if world_from_source is None:
+                    self.get_logger().warn(
+                        f'TF lookup failed ({source_frame}→{self.world_frame}) '
+                        'for road boundary',
+                        throttle_duration_sec=5.0)
+                    continue
+
+            line = []
+            for point in marker.points:
+                source_x = marker.pose.position.x + point.x
+                source_y = marker.pose.position.y + point.y
+                source_z = marker.pose.position.z + point.z
+                if world_from_source is None:
+                    world_x, world_y = source_x, source_y
+                else:
+                    world_x, world_y, _ = self._apply_transform(
+                        world_from_source, source_x, source_y, source_z)
+                line.append((world_x, world_y))
+            updated_lines[marker.ns] = line
+
+        self._boundary_lines_world.update(updated_lines)
+
+    def _update_or_create_track(
+            self,
+            world_xyz: Tuple[float, float, float],
+            scale_xyz: Tuple[float, float, float],
+            confidence: float,
+            now_ns: int) -> None:
+        track = self._nearest_track(world_xyz)
+        if track is None:
+            if confidence < self.create_confidence:
+                return
+            track_id = self._next_track_id
+            self._next_track_id += 1
+            self._tracks[track_id] = StaticTallTrack(
+                track_id=track_id,
+                world_xyz=world_xyz,
+                scale_xyz=scale_xyz,
+                hit_count=1,
+                last_observation_ns=now_ns,
+            )
+            return
+
+        if confidence < self.update_confidence:
+            return
+        track.world_xyz = self._blend(
+            track.world_xyz, world_xyz, self.position_alpha)
+        track.scale_xyz = self._blend(
+            track.scale_xyz, scale_xyz, self.scale_alpha)
+        track.hit_count += 1
+        track.last_observation_ns = now_ns
+
+    def _remove_passed_tracks(self, base_from_world: TransformStamped) -> None:
+        passed_track_ids = []
+        for track_id, track in self._tracks.items():
+            base_x, _, _ = self._apply_transform(
+                base_from_world, *track.world_xyz)
+            if base_x < -self.release_behind:
+                passed_track_ids.append(track_id)
+        for track_id in passed_track_ids:
+            del self._tracks[track_id]
+
+    def _make_marker(
+            self,
+            label: str,
+            marker_id: int,
+            base_xyz: Tuple[float, float, float],
+            scale_xyz: Tuple[float, float, float],
+            stamp) -> Marker:
+        marker = Marker()
+        marker.header.frame_id = self.target_frame
+        marker.header.stamp = stamp
+        marker.ns = label
+        marker.id = marker_id
+        marker.type = Marker.CUBE
+        marker.action = Marker.ADD
+        marker.pose.position.x = base_xyz[0]
+        marker.pose.position.y = base_xyz[1]
+        marker.pose.position.z = base_xyz[2]
+        marker.pose.orientation.w = 1.0
+        marker.scale.x = scale_xyz[0]
+        marker.scale.y = scale_xyz[1]
+        marker.scale.z = scale_xyz[2]
+        red, green, blue, alpha = TYPE_COLORS[label]
+        marker.color.r = red
+        marker.color.g = green
+        marker.color.b = blue
+        marker.color.a = alpha
+        marker.lifetime.nanosec = 200_000_000
+        return marker
 
     def callback(self, msg: MarkerArray):
         self._frame_count += 1
-
-        # Look up source_frame → target_frame transform (2026-07-29: configurable)
-        t = self._lookup(self.target_frame, self.source_frame)
-        if t is None:
-            self.get_logger().warn('TF lookup failed (sensor→base_link)',
-                                   throttle_duration_sec=5.0)
-            return
-
-        # world→base_link 的逆变换用于把 base_link 坐标存成 world 坐标
-        t_w = self._lookup(self.world_frame, self.target_frame) if self.dead_reckoning else None
-
         now_ns = self.get_clock().now().nanoseconds
+        now = self.get_clock().now().to_msg()
 
-        for marker in msg.markers:
-            if marker.action != Marker.ADD:
-                continue
-
-            # 2026-08-06: Simplify 4-class → 2-class for control interface
-            # (passthrough=True means input is from surface_detector with ns classification)
-            if self.passthrough:
-                label = simplify_classification(marker.ns)
-            else:
-                # Fallback: old 2D pipeline doesn't use ns classification
-                label = "flat_ground"  # Conservative default
-
-            # Transform position from sensor frame → base_link
-            base_x, base_y, base_z = self._apply_transform(
-                t, marker.pose.position.x, marker.pose.position.y, marker.pose.position.z)
-
-            entry = {
-                'scale': marker.scale,
-                'label': label,
-                'stamp_ns': now_ns,
-                'base_xyz': (base_x, base_y, base_z),
-                'has_world': False,
-            }
-            # 入库时记录 world 坐标，发布时可反算回当前 base_link
-            if t_w is not None:
-                entry['world_xyz'] = self._apply_transform(t_w, base_x, base_y, base_z)
-                entry['has_world'] = True
-
-            self._cache[marker.id] = entry
-
-    def _publish_cached(self):
-        """Publish cached obstacles, re-projecting world coords into current base_link."""
-        now_ns = self.get_clock().now().nanoseconds
-
-        # 清理过期条目
-        expired = [k for k, v in self._cache.items()
-                   if now_ns - v['stamp_ns'] > self.memory_ns]
-        for k in expired:
-            del self._cache[k]
-
-        if not self._cache:
-            self.pub.publish(MarkerArray())
-            return
-
-        # base_link←world 变换：把缓存的 world 坐标反算回当前车体系
-        t_b = self._lookup(self.target_frame, self.world_frame) if self.dead_reckoning else None
-        if self.dead_reckoning and t_b is None:
+        base_from_sensor = self._lookup(self.target_frame, self.source_frame)
+        if base_from_sensor is None:
             self.get_logger().warn(
-                f'TF {self.world_frame}→{self.target_frame} unavailable — '
-                'holding cached positions without dead reckoning',
+                'TF lookup failed (sensor→base_link)',
+                throttle_duration_sec=5.0)
+            return
+
+        world_from_base = self._lookup(self.world_frame, self.target_frame)
+        base_from_world = self._lookup(self.target_frame, self.world_frame)
+        can_track = world_from_base is not None and base_from_world is not None
+        if not can_track:
+            self.get_logger().warn(
+                f'TF {self.world_frame}↔{self.target_frame} unavailable; '
+                'publishing current high-confidence tall observations only',
                 throttle_duration_sec=5.0)
 
-        now = self.get_clock().now().to_msg()
-        out = MarkerArray()
+        current_flats: List[Tuple[int, Tuple[float, float, float], Tuple[float, float, float]]] = []
+        fallback_talls: List[Tuple[int, Tuple[float, float, float], Tuple[float, float, float]]] = []
 
-        for mid, e in self._cache.items():
-            if t_b is not None and e['has_world']:
-                wx, wy, wz = e['world_xyz']
-                px, py, pz = self._apply_transform(t_b, wx, wy, wz)
-            else:
-                px, py, pz = e['base_xyz']  # 降级: 保持入库时的相对位置
+        for marker in msg.markers:
+            if marker.action != Marker.ADD or marker.type != Marker.CUBE:
+                continue
 
-            m = Marker()
-            m.header.frame_id = self.target_frame
-            m.header.stamp = now
-            m.ns = e['label']
-            m.id = mid
-            m.type = Marker.CUBE
-            m.action = Marker.ADD
-            m.pose.position.x = px
-            m.pose.position.y = py
-            m.pose.position.z = pz
-            m.pose.orientation.w = 1.0
-            m.scale = e['scale']
+            label = simplify_classification(marker.ns) if self.passthrough else 'flat_ground'
+            base_xyz = self._apply_transform(
+                base_from_sensor,
+                marker.pose.position.x,
+                marker.pose.position.y,
+                marker.pose.position.z)
+            scale_xyz = (marker.scale.x, marker.scale.y, marker.scale.z)
 
-            # 使用2类颜色映射
-            r, g, b, a = TYPE_COLORS.get(e['label'], TYPE_COLORS['tall'])  # 默认红色(tall)
-            m.color.r = r
-            m.color.g = g
-            m.color.b = b
-            m.color.a = a
-            m.lifetime.nanosec = 200_000_000  # 200ms
-            out.markers.append(m)
+            if label == 'flat_ground':
+                current_flats.append((marker.id, base_xyz, scale_xyz))
+                continue
 
-        self.pub.publish(out)
+            confidence = self._confidence(marker)
+            if confidence is None:
+                self.get_logger().warn(
+                    'Skipping tall candidate without c=<score> in marker.text',
+                    throttle_duration_sec=5.0)
+                continue
+            if not self._has_obstacle_semantic(marker):
+                continue
 
-        if self._frame_count % self._log_interval == 0 and out.markers:
-            types = {}
-            for m in out.markers:
-                types[m.ns] = types.get(m.ns, 0) + 1
-            summary = ", ".join(f"{k}={v}" for k, v in types.items())
+            if not can_track:
+                if confidence >= self.create_confidence:
+                    fallback_talls.append((marker.id, base_xyz, scale_xyz))
+                continue
+
+            world_xyz = self._apply_transform(world_from_base, *base_xyz)
+            if self._is_roadside_object(world_xyz, base_from_world):
+                continue
+            self._update_or_create_track(
+                world_xyz, scale_xyz, confidence, now_ns)
+
+        output = MarkerArray()
+        published_tall_positions: List[Tuple[float, float]] = []
+
+        if can_track:
+            self._remove_passed_tracks(base_from_world)
+            for track_id in sorted(self._tracks):
+                track = self._tracks[track_id]
+                base_xyz = self._apply_transform(base_from_world, *track.world_xyz)
+                output.markers.append(self._make_marker(
+                    'tall', track.track_id, base_xyz, track.scale_xyz, now))
+                published_tall_positions.append((base_xyz[0], base_xyz[1]))
+
+        for marker_id, base_xyz, scale_xyz in fallback_talls:
+            output.markers.append(self._make_marker(
+                'tall', marker_id, base_xyz, scale_xyz, now))
+            published_tall_positions.append((base_xyz[0], base_xyz[1]))
+
+        for marker_id, base_xyz, scale_xyz in current_flats:
+            overlaps_tall = any(
+                math.hypot(base_xyz[0] - tall_x, base_xyz[1] - tall_y)
+                <= self.association_distance
+                for tall_x, tall_y in published_tall_positions)
+            if not overlaps_tall:
+                output.markers.append(self._make_marker(
+                    'flat_ground', marker_id, base_xyz, scale_xyz, now))
+
+        self.pub.publish(output)
+
+        if self._frame_count % 10 == 0:
             self.get_logger().info(
-                f'Frame {self._frame_count}: {len(out.markers)} obstacles → {summary}'
-            )
+                f'Frame {self._frame_count}: tracks={len(self._tracks)}, '
+                f'boundaries={len(self._boundary_lines_world)}, '
+                f'published={len(output.markers)}')
 
 
 def main(args=None):
@@ -259,8 +456,10 @@ def main(args=None):
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
-    node.destroy_node()
-    rclpy.shutdown()
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

@@ -92,7 +92,7 @@ residual = z_point - S(r, theta)
 综合点数、几何特征和时序历史，低于 `confidence_threshold` 的结果仅发往低
 置信调试 topic。
 
-## 5. 障碍物适配与时序留存：`obstacle_adapter`
+## 5. 障碍物适配与静态 `tall` Track：`obstacle_adapter`
 
 实现：`src/lidar3d_bringup/lidar3d_bringup/obstacle_adapter.py`。
 
@@ -101,10 +101,65 @@ residual = z_point - S(r, theta)
 - `obstacle` 映射为 `tall`，供 Frenet 横向走廊避让；
 - 可通过地形类与 `unknown` 映射为 `flat_ground`，供跟随器减速，不触发横向绕行。
 
-直接缓存 `base_link` 坐标会让旧障碍物粘在车身前方。因此缓存写入时先做
-`base_link -> map` 变换，发布时再做 `map -> base_link` 变换。车辆前进后，旧
-障碍物在车体系中的 `x` 会自然减小。`obstacle_memory_ms` 控制遮挡容忍与幽灵
-障碍保留时间的平衡。
+`flat_ground` 只代表当前帧可通过地形，因此不做跨帧缓存。`tall` 则维护独立的
+静态 Track：
+
+```text
+输入 CUBE marker
+  -> sensor -> base_link -> map
+  -> 最近邻关联已有 tall Track，或创建新 Track
+  -> map -> 当前 base_link
+  -> /obstacle_markers
+```
+
+Track 保存 `{track_id, world_xyz, scale_xyz, hit_count, last_observation}`。关联只使用
+地图系 `x/y` 距离，不使用上游 `marker.id`，因为聚类编号会随帧变化。位置和尺寸的
+指数更新为：
+
+```text
+track_value <- (1 - alpha) * track_value + alpha * observation
+```
+
+默认 `alpha = 0.30`，用于压低簇中心和尺寸的逐帧跳动，不扩大障碍物。
+
+### 5.1 建立、更新和删除条件
+
+`surface_detector` 在 `marker.text` 中输出组合置信度 `c`。该分数来自点数、垂直性、
+边缘比例和短期分类历史；正式高置信 topic 的基础门槛为 `0.35`。adapter 在此之上
+使用两级门槛：
+
+- `c >= 0.80`：单帧立即建立 `tall` Track；
+- `c >= 0.60`：仅更新已有关联 Track；
+- 低于 `0.60`：不创建、不更新长期 Track；
+- 同位置 `flat_ground` 不覆盖 `tall` Track。
+
+空 `MarkerArray` 仍会触发 adapter 回调；只要 Track 未删除，它就会继续发布给规划器。
+Track 不按时间过期。每帧把 Track 转入当前 `base_link`，只有当
+`track_base_x < -track_release_behind_m`（默认 `-2.0 m`）时才删除，表示车辆已通过
+障碍物并留出车尾安全距离。这样近场盲区、瞬时空帧和短暂 `flat_ground` 误分类不会让
+规划器重新忽略已确认的静态障碍物。
+
+### 5.2 感知道路边界的 Track 排除
+
+`road_analyzer` 发布 `road_left` 和 `road_right` 两条 `LINE_STRIP`。adapter 将每条线
+从其消息坐标系转换到 `map`，因此车辆运动不会让已收到的边界点粘在旧车体系。发布或更新
+Track 时，边界会先投回当前 `base_link`，并在候选的前向位置 `x` 处插值：
+
+```text
+left_y(x)  = 左边界在 x 处的横向位置
+right_y(x) = 右边界在 x 处的横向位置
+```
+
+若两侧边界都有效，只有满足 `right_y(x) < obstacle_y < left_y(x)` 的对象才属于车道内，
+允许创建新 Track。落在左右边界外侧的候选视为路侧物，不创建 Track。若只得到单侧
+边界，只排除该边界外侧、且距离不超过 `boundary_exclusion_distance_m`（默认 `1.0 m`）
+的候选。道路边界只参与新建候选的过滤，不能删除已确认 Track；已确认 Track 仍只按
+车辆通过条件释放。这样边界缺失、相交或跳变不会杀死真实车道内障碍物。
+
+“车道内”只决定边界过滤是否放行，并不自动创建 Track。新建或更新 Track 仍要求上游
+marker 的 namespace 为 `obstacle`、文本语义以 `obstacle_H` 开头，且满足相应的 `c`
+置信度门槛。因此普通地面车道漆线不会进入 Track；`passable_*`、`unknown` 或 tracker
+遗留的非 `obstacle_H` 文本也不会影响 Track。
 
 ## 6. 道路双侧边界：`road_analyzer`
 
@@ -155,8 +210,27 @@ width = y_left - y_right
 ### 6.4 平滑、缓存和中心线
 
 每侧轨迹按 `x` 排序后使用滚动中位数平滑 `y`，既保留道路弯曲趋势，又能抑制单
-帧回波尖刺。缓存去重同样按纵向 bin 完成；同一帧只写入一次 `map` 坐标缓存，
-避免定时发布时不断重复同一帧点。
+帧回波尖刺。边界缓存保存于 `map`，并只用于填补当前帧的缺失 bin：
+
+```text
+若当前帧在 bin(x) 有可靠 live 点：输出 live 点
+否则：                           输出 map cache 投回当前 base_link 的点
+```
+
+因此避障时车辆朝向变化不会把旧车体系的直线段与新观测中值混合；地图中真实直路投回
+当前车体系后仍是一条直线（可能相对车辆倾斜）。真实弯道的 live 点在地图中沿同一条
+连续弧线分布，所以会被保留并自然显示为弯曲车道线。
+
+写入缓存前，live 左右线分别与同侧近期地图缓存计算最近点距离的中位数：
+
+```text
+jump_side = median(min_distance(live_world_point, cached_world_points))
+```
+
+只有左右两侧的 `jump_side` 都不超过 `world_continuity_threshold_m`（默认 `0.8 m`）时，
+本帧 live 边界才会进入输出和缓存；任一侧明显跳变时，整对 live 线被拒绝，暂由已有
+map cache 补洞。这保证弯道的连续曲率不会被冻结，同时抑制由稀疏点云、遮挡或避障姿态
+造成的数米级错误折线。同一输入帧只写入一次缓存，避免定时发布时重复累积点。
 
 可视化中心线仅在左右线的共同 `x` 范围内插值：
 
