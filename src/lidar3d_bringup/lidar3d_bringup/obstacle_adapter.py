@@ -3,7 +3,7 @@
 Obstacle adapter: classify + transform + republish for planning/control.
 
 Subscribes to /obstacles/boxes_3d_surface (MarkerArray from surface_detector).
-Simplifies 5-class terrain classification to 2 obstacle types for control:
+Simplifies 4-class terrain classification to 2 obstacle types for control:
   - "tall"        — impassable obstacles requiring avoidance
   - "flat_ground" — passable terrain (slow down if needed)
 
@@ -41,17 +41,14 @@ def simplify_classification(surface_ns: str) -> str:
       - "obstacle"       → tall (impassable, avoid)
       - "passable_low"   → flat_ground (passable)
       - "passable_high"  → flat_ground (passable, slow)
-      - "boundary"       → SKIP (handled by road_analyzer → /road_boundary_markers)
       - "unknown"        → flat_ground (conservative: treat as passable)
 
-    Returns: "tall" | "flat_ground" | None (None = skip boundary markers)
+    Returns: "tall" | "flat_ground"
     """
     if surface_ns == "obstacle":
         return "tall"
     elif surface_ns in ("passable_low", "passable_high", "unknown"):
         return "flat_ground"
-    elif surface_ns == "boundary":
-        return None  # road boundaries handled separately
     else:
         # Unknown label from upstream → default to flat_ground (conservative)
         return "flat_ground"
@@ -163,12 +160,10 @@ class ObstacleAdapter(Node):
             if marker.action != Marker.ADD:
                 continue
 
-            # 2026-08-05: Simplify 5-class → 2-class for control interface
+            # 2026-08-06: Simplify 4-class → 2-class for control interface
             # (passthrough=True means input is from surface_detector with ns classification)
             if self.passthrough:
                 label = simplify_classification(marker.ns)
-                if label is None:  # Skip boundary markers (handled by road_analyzer)
-                    continue
             else:
                 # Fallback: old 2D pipeline doesn't use ns classification
                 label = "flat_ground"  # Conservative default

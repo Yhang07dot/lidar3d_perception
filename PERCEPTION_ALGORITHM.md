@@ -86,8 +86,9 @@ residual = z_point - S(r, theta)
 个固定高度差同时处理近场密集点和远场稀疏点。近场若曲面栅格样本不足，则用
 全局地面参考替代插值曲面，防止 16 线雷达近场无 ground 回波时产生大量伪障碍。
 
-超过阈值的点被聚类；每个簇使用主方向、垂直度、尺寸和高度等几何特征分类为
-`obstacle`、`passable_low`、`passable_high`、`boundary` 或 `unknown`。置信度
+超过阈值的点被聚类；每个簇使用垂直度、尺寸和高度等几何特征分类为
+`obstacle`、`passable_low`、`passable_high` 或 `unknown`。道路边界不在此处分类，
+统一由 `road_analyzer` 从 nonground 点云提取。置信度
 综合点数、几何特征和时序历史，低于 `confidence_threshold` 的结果仅发往低
 置信调试 topic。
 
@@ -95,10 +96,10 @@ residual = z_point - S(r, theta)
 
 实现：`src/lidar3d_bringup/lidar3d_bringup/obstacle_adapter.py`。
 
-适配器将五类曲面分类压缩成规划器需要的两类 marker：
+适配器将四类曲面分类压缩成规划器需要的两类 marker：
 
-- 不可通过/边界类映射为 `tall`，供 Frenet 横向走廊避让；
-- 可通过地形类映射为 `flat_ground`，供跟随器减速，不触发横向绕行。
+- `obstacle` 映射为 `tall`，供 Frenet 横向走廊避让；
+- 可通过地形类与 `unknown` 映射为 `flat_ground`，供跟随器减速，不触发横向绕行。
 
 直接缓存 `base_link` 坐标会让旧障碍物粘在车身前方。因此缓存写入时先做
 `base_link -> map` 变换，发布时再做 `map -> base_link` 变换。车辆前进后，旧

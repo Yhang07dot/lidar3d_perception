@@ -80,7 +80,7 @@ def launch_setup(context, *args, **kwargs):
         parameters=[params_file, {'use_sim_time': True}],
     )
 
-    # Obstacle adapter: 5-class → 2-class + TF → /obstacle_markers
+    # Obstacle adapter: 4-class → 2-class + TF → /obstacle_markers
     adapter_node = Node(
         package='lidar3d_bringup', executable='obstacle_adapter',
         name='obstacle_adapter', output='screen',

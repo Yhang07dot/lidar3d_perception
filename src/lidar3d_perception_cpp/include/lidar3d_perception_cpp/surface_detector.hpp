@@ -22,14 +22,13 @@
 namespace lidar3d
 {
 
-// --- type system (simplified to 5 types) — mirrors Python TYPE_* constants ---
+// --- type system (simplified to 4 types) ---
 enum ObstacleType : int
 {
   TYPE_OBSTACLE = 0,       // 不可通过障碍物
   TYPE_PASSABLE_LOW = 1,   // 可通过（坡、细杆、减速带、粗糙地形）
   TYPE_PASSABLE_HIGH = 2,  // 需减速通过（波浪路、坑洼）
-  TYPE_BOUNDARY = 3,       // 路沿边界
-  TYPE_UNKNOWN = 4,        // 未知/低置信度
+  TYPE_UNKNOWN = 3,        // 未知/低置信度
 };
 
 inline const char * typeLabel(int t)
@@ -38,7 +37,6 @@ inline const char * typeLabel(int t)
     case TYPE_OBSTACLE: return "obstacle";
     case TYPE_PASSABLE_LOW: return "passable_low";
     case TYPE_PASSABLE_HIGH: return "passable_high";
-    case TYPE_BOUNDARY: return "boundary";
     default: return "unknown";
   }
 }
@@ -50,7 +48,6 @@ inline void typeColor(int t, float & r, float & g, float & b, float & a)
     case TYPE_OBSTACLE:      r = 1.0f; g = 0.0f; b = 0.0f; a = 0.7f; break;
     case TYPE_PASSABLE_LOW:  r = 0.0f; g = 0.8f; b = 0.0f; a = 0.5f; break;
     case TYPE_PASSABLE_HIGH: r = 1.0f; g = 0.9f; b = 0.0f; a = 0.6f; break;
-    case TYPE_BOUNDARY:      r = 0.0f; g = 0.5f; b = 1.0f; a = 0.6f; break;
     default:                 r = 0.7f; g = 0.7f; b = 0.7f; a = 0.4f; break;
   }
 }
@@ -424,7 +421,7 @@ inline Classification classifySurface(const Cloud & pts, double ground_z_mean)
   // PCA via covariance eigendecomposition (Eigen) — equivalent to the SVD the
   // Python version runs on the centred points; eigenvalues are the squared
   // singular values up to a constant factor, which cancels in the ratios below.
-  double verticality = 0.0, slope_deg = 0.0, l0 = 1.0, l1 = 0.0, l2 = 0.0;
+  double verticality = 0.0, slope_deg = 0.0, l2 = 0.0;
   if (n >= 5) {
     Eigen::Matrix3d cov = Eigen::Matrix3d::Zero();
     for (const auto & p : pts) {
@@ -437,7 +434,7 @@ inline Classification classifySurface(const Cloud & pts, double ground_z_mean)
       Eigen::Vector3d ev = solver.eigenvalues();
       const double ls = ev.sum();
       if (ls > 1e-12) {
-        l0 = ev(2) / ls; l1 = ev(1) / ls; l2 = ev(0) / ls;
+        l2 = ev(0) / ls;
         // smallest-eigenvalue eigenvector = surface normal; sign is arbitrary so
         // take |z| (the Python port does the same via abs()).
         const double nz = std::abs(solver.eigenvectors().col(0).z());
@@ -449,7 +446,6 @@ inline Classification classifySurface(const Cloud & pts, double ground_z_mean)
 
   const double W = std::max(dims.x(), dims.y());
   const double W_min = std::min(dims.x(), dims.y());
-  const double linearity = (l0 > 1e-12) ? (l0 - l1) / l0 : 0.0;
   const double curvature = l2;
   const double rel_elev = mn.z() - ground_z_mean;
 
@@ -475,33 +471,28 @@ inline Classification classifySurface(const Cloud & pts, double ground_z_mean)
   // rel_elev准确；命中完整侧面时H准确。取两者较大值兼顾两种情形。
   const double height_est = std::max(rel_elev, H);
 
-  // 1. 路沿（长条形 + 边缘特征）
-  if (linearity > 0.6 && W > 3.0 && edge_ratio > 0.6 && H > 0.1 && H < 0.8) {
-    snprintf(buf, sizeof(buf), "boundary_L%.1fm_H%.2fm", W, H);
-    out.type_id = TYPE_BOUNDARY; out.label = buf; return out;
-  }
-  // 2. 宽大坡面 → 可通过（提前判定，避免高坡被误判为障碍物）
+  // 1. 宽大坡面 → 可通过（提前判定，避免高坡被误判为障碍物）
   if (W > 4.0) {
     snprintf(buf, sizeof(buf), "passable_slope_big_W%.1fm", W);
     out.type_id = TYPE_PASSABLE_LOW; out.label = buf; return out;
   }
-  // 3. 不可通过障碍物（高 + 紧凑 + 悬空/垂直）。compactness约束(W<2.5)区分
+  // 2. 不可通过障碍物（高 + 紧凑 + 悬空/垂直）。compactness约束(W<2.5)区分
   //    "有限尺寸凸起(箱体/电线杆)"和"连续地形(缓坡/起伏路)"。
   if (height_est > 0.5 && W < 2.5 && (rel_elev > 0.25 || verticality > 0.7)) {
     snprintf(buf, sizeof(buf), "obstacle_H%.1fm_d%.0fm", height_est, dist);
     out.type_id = TYPE_OBSTACLE; out.label = buf; return out;
   }
-  // 4. 需减速通过（波浪路：点多、平缓）
+  // 3. 需减速通过（波浪路：点多、平缓）
   if (n > 30 && curvature < 0.01 && H < 1.0) {
     snprintf(buf, sizeof(buf), "wave_L%.1fm", W);
     out.type_id = TYPE_PASSABLE_HIGH; out.label = buf; return out;
   }
-  // 5. 可通过：缓坡
+  // 4. 可通过：缓坡
   if (slope_deg < 20.0 && height_est < 2.0) {
     snprintf(buf, sizeof(buf), "passable_slope%.0fdeg", slope_deg);
     out.type_id = TYPE_PASSABLE_LOW; out.label = buf; return out;
   }
-  // 6. 可通过：细杆、减速带、矮障碍物
+  // 5. 可通过：细杆、减速带、矮障碍物
   if (height_est < 0.5) {
     if (verticality > 0.7 && W_min < pole_width_max) {
       snprintf(buf, sizeof(buf), "passable_pole_H%.2fm", height_est);
@@ -510,12 +501,12 @@ inline Classification classifySurface(const Cloud & pts, double ground_z_mean)
     }
     out.type_id = TYPE_PASSABLE_LOW; out.label = buf; return out;
   }
-  // 7. 远处稀疏小簇 → 未知
+  // 6. 远处稀疏小簇 → 未知
   if (dist > 15.0 && n < min_pts_small) {
     snprintf(buf, sizeof(buf), "unknown_sparse_d%.0fm", dist);
     out.type_id = TYPE_UNKNOWN; out.label = buf; return out;
   }
-  // 8. 默认：可通过的粗糙地形
+  // 7. 默认：可通过的粗糙地形
   snprintf(buf, sizeof(buf), "passable_rough_H%.2fm", height_est);
   out.type_id = TYPE_PASSABLE_LOW; out.label = buf;
   return out;
