@@ -115,6 +115,9 @@ grade_deg=<deg> cells=<count> c=1.00
 source topic 中 apex 在点云坐标系；adapter 发布 `/obstacle_markers` 时将 apex 转到
 `base_link`，并保留其余字段。最终 marker 的 `ns=flat_ground`，`pose`/`scale` 同样在
 `base_link`；坡上存在 `tall` 时该地形元数据仍会同时发布，供控制端独立决定减速时机。
+这里的 `pose` 是坡面区域中心，不是 apex；`span_x` 与最终 `scale.x` 相同。控制端若只
+使用现有几何接口，应按 `pose.x ± scale.x / 2` 计算坡段；若需坡顶精确位置，再解析
+`text` 中的 `apex_*`。
 
 ## 5. 障碍物适配与静态 `tall` Track：`obstacle_adapter`
 
@@ -312,3 +315,52 @@ ros2 topic info -v /cmd_control
 `/planner/status` 为 `FEASIBLE` 后，`/cmd_control` 应由 `path_follower_node`
 持续发布。若规划可行而 `/cmd_control` 没有发布者，问题在控制节点生命周期或
 控制输入，不在 LiDAR 边界检测。
+
+## 9. 控制交接接口（当前正式版本）
+
+本节定义控制端消费的最终接口。上游 `/obstacles/boxes_3d_surface` 是感知内部 source
+topic，控制端不得直接订阅；正式输入为 adapter 输出的 `/obstacle_markers`。
+
+### 9.1 `/obstacle_markers`
+
+- 类型：`visualization_msgs/msg/MarkerArray`。
+- 坐标系：每个 marker 的 `header.frame_id = base_link`，采用 `x` 前、`y` 左、`z` 上。
+- 公共字段：`type = CUBE`、`action = ADD`、当前 orientation 为单位四元数、
+  `lifetime = 0.2 s`。控制端必须按新消息刷新，不能把过期 marker 当作仍有效目标。
+
+| `ns` | 生命周期 | `pose` / `scale` 含义 | 控制语义 |
+|---|---|---|---|
+| `tall` | map 系静态 Track，车辆通过后删除 | `pose` 为车体系中心，`scale.x/y/z` 为当前轴对齐碰撞尺寸 | 横向避障；`id` 在同一 Track 生命周期内稳定。 |
+| `flat_ground` | 当前帧地形，不做跨帧 Track | `pose` 为区域中心，`scale.x` 为前向坡长 `span_x`，`scale.y/z` 为横向/高度范围 | 仅纵向减速；`id` 为瞬时数组编号，禁止用于追踪。 |
+
+坡面 `flat_ground.text` 是控制组扩展字段，格式固定、字段单位均为米或度：
+
+```text
+passable_slope apex_x=<m> apex_y=<m> apex_z=<m> span_x=<m>
+grade_deg=<deg> cells=<count> c=1.00
+```
+
+`apex_*` 已由 adapter 转到 `base_link`；`span_x` 必须与 `scale.x` 一致。顶点与区域中心
+不同：上坡时 apex 常接近区域远端，山包时 apex 可位于区域中部。因此 apex 和总长不足以
+严格反推起止边界；当前接口的确定坡段是
+`[pose.x - scale.x / 2, pose.x + scale.x / 2]`。
+
+### 9.2 当前 Baja 控制行为与责任边界
+
+当前 `path_follower_node` 已消费两类 marker：
+
+- `tall`：按 `pose`、`scale` 进入横向安全处理；
+- `flat_ground`：选择最近的前向区域，按 `pose.x ± scale.x / 2` 和
+  `obstacle_classes.flat_ground.approach_distance` 平滑降到
+  `obstacle_classes.flat_ground.slow_speed`，不执行横向绕行。
+
+截至 **2026 年 8 月 7 日**，Baja 控制代码尚未解析 `text` 中的 `apex_*`、`grade_deg`、
+`cells`。控制组如需根据坡顶距离、坡度或置信度设计更精细速度曲线，需要实现该固定格式的
+解析；解析缺失、格式未知或字段非法时，应安全回退为现有 `pose/scale.x` 几何降速逻辑。
+
+### 9.3 `/road_boundary_markers`
+
+该 topic 同为 `visualization_msgs/msg/MarkerArray`，包含 `ns=road_left` 和
+`ns=road_right` 的 `LINE_STRIP`。消息坐标系为 `base_link`，`points` 是相对 marker
+`pose` 的折线点。Frenet planner 使用它收紧横向走廊；`/lidar/centerline` 只作调试，
+当前全局行驶方向仍来自 `/reference_centerline`。

@@ -1,199 +1,128 @@
-# lidar3d_ws — 3D LiDAR 感知与聚类工作区
+# lidar3d_ws — 当前 LiDAR 感知与控制接口
 
-基于 ROS 2 Humble 的 3D LiDAR 感知 pipeline，支持 **rosbag 回放**、**Gazebo 仿真**、**实车 LiDAR** 三种数据源模式。
+基于 ROS 2 Humble 的 LiDAR 感知工作区。当前正式交付目标是 Baja 仿真中的方案 A：
+感知提供道路边界、静态 `tall` 障碍物和坡面 `flat_ground`；控制端负责路径规划、横向避障
+与纵向减速。
 
-复杂感知计算、参数语义、坐标系和方案 A 的规划接口见
+复杂计算、参数语义、坐标系和验收边界见
 [`PERCEPTION_ALGORITHM.md`](PERCEPTION_ALGORITHM.md)。
 
-## 启动命令速查
+## 正式启动
 
 ```bash
-# ===== 基础模式 =====
-ros2 launch lidar3d_bringup play_and_viz.launch.py                                    # rosbag 回放（默认）
-ros2 launch lidar3d_bringup play_and_viz.launch.py input_source:=simulation           # Gazebo 仿真
-ros2 launch lidar3d_bringup play_and_viz.launch.py input_source:=lidar                # 实车 LiDAR
+# Terminal 1: 启动 Baja 仿真
+cd ~/baja_cloud_sim-2.2
+./run.sh
 
-# ===== 仿真 + 3D 聚类 + 坡面/障碍物区分（推荐仿真用）=====
-ros2 launch lidar3d_bringup play_and_viz.launch.py \
-    input_source:=simulation use_3d_clustering:=true
-
-# ===== 高级参数 =====
-ros2 launch lidar3d_bringup play_and_viz.launch.py \
-    input_source:=simulation use_3d_clustering:=true \
-    cloud_topic:=/my_points max_range:=25.0 sensor_height:=1.5
-
-# 关闭地面分割（调试用）
-ros2 launch lidar3d_bringup play_and_viz.launch.py enable_ground_seg:=false
+# Terminal 2: 启动当前正式感知链
+cd ~/lidar3d_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch lidar3d_bringup lidar_sim.launch.py
 ```
 
-## 数据流
+`play_and_viz.launch.py` 仅保留给 rosbag/旧链路调试。向控制组交付或进行当前仿真测试时，
+使用 `lidar_sim.launch.py`，不要同时启动两套 launch。
 
-### 当前仿真感知链（`lidar_sim.launch.py`）
+## 当前正式数据流
 
 ```text
 /lidar/points
   → pointcloud_filter → /cx/lslidar_point_cloud_filtered
-  → Patchwork++ → /patchworkpp/nonground
+  → patchworkpp_node ──→ /patchworkpp/ground
+                       │     → surface_detector（连续坡面）
+                       └─→ /patchworkpp/nonground
+                             → surface_detector（残差 tall）
   → surface_detector → /obstacles/boxes_3d_surface
   → obstacle_adapter → /obstacle_markers
 
 /patchworkpp/nonground
-  → road_analyzer → /road_boundary_markers、/lidar/centerline
+  → road_analyzer → /road_boundary_markers、/lidar/centerline（调试）
 ```
 
-- `obstacle_adapter` 将高置信 `obstacle_H...` 转为地图系静态 `tall` Track；Track 在
-  空帧、短暂误分类和近场盲区中持续发布，车辆通过后才释放。
-- `road_analyzer` 独立提取左右道路边界。当前帧可靠边界优先，地图缓存只补缺失 bin，
-  从而避免避障姿态变化把历史直线段和当前边界混合成锯齿。
-- `surface_detector` 还会从 Patchwork++ 已确认的 ground 点拟合连续纵向坡面；坡面以
-  `flat_ground` 发送给控制端，`Marker.text` 提供顶点与 `x` 向长度，tall 障碍物路径不参与
-  该判断也不会被坡面覆盖。
-- 详细的坐标变换、置信度门槛、Track 生命周期和边界连续性规则见
-  [`PERCEPTION_ALGORITHM.md`](PERCEPTION_ALGORITHM.md)。
+- `surface_detector_node` 的 `ground` 路径识别连续纵向坡面；`nonground` 残差路径识别
+  `tall`，两者相互独立。
+- `obstacle_adapter` 将高置信 `obstacle_H...` 转为 map 系静态 `tall` Track；空帧、短暂
+  误分类和近场盲区不会删除已确认 Track，车辆通过后才释放。
+- `road_analyzer` 的当前可靠边界优先，map 空间缓存只补缺失 bin；规划器据此收紧横向走廊。
 
-### 2D 链路（默认，兼容旧版）
+## 节点状态：正式链路与不要启动项
+
+| 节点 | 当前状态 | 原因 |
+|------|----------|------|
+| `tf_bridge` | 仿真必需 | 提供 `base_link → baja_vehicle/base_link/lidar`，供 adapter 与 RViz 使用。 |
+| `pointcloud_filter` | 必需 | 统一输入范围、高度和水平视场。 |
+| `patchworkpp_node` | 必需 | 提供 `ground`（坡面）和 `nonground`（障碍物/边界）两路输入。 |
+| `surface_detector_node` | 必需 | C++ 主算法：残差 tall、ground 坡面和 source marker。 |
+| `obstacle_adapter` | 必需 | 生成控制组订阅的 `/obstacle_markers`，维护 tall Track。 |
+| `road_analyzer` | 必需 | 发布道路边界；adapter 用它过滤路侧误建 Track，规划器用它收紧横向走廊。 |
+| `rviz2_surface` | 可选 | 仅可视化，`use_rviz:=false` 时不启动。 |
+
+以下节点或旧链路**不属于当前正式仿真链路，不要与 `lidar_sim.launch.py` 同时启动**：
+
+| 节点/链路 | 当前处理方式 | 原因 |
+|-----------|--------------|------|
+| `cluster_bbox` | 调试兼容保留 | 等待旧 `/clusters/points`；当前没有正式上游聚类器，不参与控制交付。 |
+| `euclidean_grid`、`euclidean_cluster_3d`、`cluster_analyzer` | 已移除 | 已被 C++ `surface_detector_node` 替代。 |
+| `voxel_analyzer`、`boundary_detector`、Python `surface_detector.py` | 已失效 | 当前无源码/console entrypoint；`lidar_params.yaml` 中对应块只保留历史参数参考。 |
+| `tf_publisher` | rosbag 专用 | 为 `/chcnav/odom` 和 `laser_link` 构建 TF；标准仿真使用 `tf_bridge`，不需要它。 |
+| `play_and_viz.launch.py` | 兼容/诊断 | 会按旧参数尝试启动备用路径；不作为当前控制组集成入口。 |
+
+## 给控制组的正式接口
+
+### `/obstacle_markers`
+
+- **类型**：`visualization_msgs/msg/MarkerArray`。控制端应订阅此 topic，而非 source
+  `/obstacles/boxes_3d_surface`。
+- **坐标系**：每个 marker 的 `header.frame_id = base_link`，`x` 向前、`y` 向左、`z` 向上。
+- **形状**：`type = CUBE`、`action = ADD`、当前 `pose.orientation` 为单位四元数，
+  `scale.x/y/z` 为车体系轴对齐尺寸。`lifetime = 0.2 s`，控制端应按持续新消息刷新。
+
+| `ns` | 语义 | 控制端可依赖字段 | 当前行为 |
+|------|------|----------------|----------|
+| `tall` | 不可通行静态障碍物 | `pose` 为中心；`scale.x/y/z` 为碰撞尺寸；`id` 为 Track 生命周期内稳定 ID | 参与 Frenet 横向避障；Track 在近场盲区/短暂漏检中继续发布，车辆通过后删除。 |
+| `flat_ground` | 可通过特殊地形（当前为坡面） | `pose` 为区域中心；`scale.x = span_x` 为前向坡长；`scale.y/z` 为横向/高度范围 | 不参与横向避障；供纵向减速。flat marker 的 `id` 只在当前帧有效，不能用于追踪。 |
+
+坡面 `flat_ground.text` 的固定格式如下，所有坐标已经是 `base_link`：
 
 ```text
-输入点云 → pointcloud_filter → /cx/lslidar_point_cloud_filtered
-  → Patchwork++ ──→ /patchworkpp/ground (地面)
-                 └─→ /patchworkpp/nonground (非地面)
-                       → euclidean_grid (2D 聚类) → /clusters/points
-                         → cluster_bbox → /obstacles/boxes
-                           → obstacle_adapter → /obstacle_markers
+passable_slope apex_x=<m> apex_y=<m> apex_z=<m> span_x=<m>
+grade_deg=<deg> cells=<count> c=1.00
 ```
 
-### 3D-PCA 链路（`use_3d_clustering:=true`）
+- `apex_*`：坡面最高地面栅格。
+- `span_x`：与 `scale.x` 相同的前向坡长。
+- `pose`：坡面区域中心，不是 apex。仅凭 apex 和总长度不能严格恢复起止边界；当前 Baja
+  跟随器按 `pose.x ± scale.x / 2` 计算坡段。
 
-```text
-/patchworkpp/nonground
-  → euclidean_cluster_3d (3D 体素聚类) → /clusters/points_3d
-    → cluster_analyzer (PCA 特征 + 规则分类 + 时序追踪) → /obstacles/boxes_3d
-      → obstacle_adapter → /obstacle_markers
-```
+**当前 Baja 控制代码的实际消费范围**：`path_follower_node` 已对 `flat_ground` 按
+`pose.x` 和 `scale.x` 做渐进降速（不做横向绕行），也会对 `tall` 做横向安全处理；它**尚未
+解析** `text` 中的 `apex_*`、`grade_deg` 与 `cells`。控制组若要按坡顶位置或坡度制定更精细
+速度曲线，需要自行解析上述固定格式；解析失败时应回退到 `pose/scale.x` 几何逻辑。
 
-### 3D-体素链路（`use_voxel_analyzer:=true`，2026-07-30 新增）
+### `/road_boundary_markers`
 
-```text
-/patchworkpp/nonground
-  → voxel_analyzer (多分辨率体素网格 + 几何特征 + 体素聚类) → /obstacles/boxes_3d_voxel
-    → obstacle_adapter → /obstacle_markers
-```
+- **类型**：`visualization_msgs/msg/MarkerArray`，包含 `ns=road_left` 与 `ns=road_right`
+  的 `LINE_STRIP`。
+- **坐标系**：当前发布在 `base_link`；`points` 是相对 marker `pose` 的折线点。
+- **用途**：规划器用其收紧横向可行走廊；`/lidar/centerline` 仅作调试，当前全局参考仍是
+  `/reference_centerline`，控制端不要将其当作正式全局导航输入。
 
-体素网格：0-15m:0.1m, 15-30m:0.2m, 30-50m:0.4m。每格去最高 5% 浮点，提取 z_range/z_variance/density，26 邻域体素聚类。
-
-**所有 3D 链路分类输出**：
-
-| 类型 | type_id | 颜色 | 含义 |
-|------|---------|------|------|
-| **slope** | 3 | 深绿 | 可通过坡面 |
-| **bump** | 2 | 黄 | 减速带/低坎 |
-| **pole** | 1 | 红 | 杆状障碍物 |
-| **obstacle** | 0 | 橙 | 不可通过 |
-
-## 节点一览
-
-| 可执行文件 | 节点名 | 功能 |
-|-----------|--------|------|
-| `tf_bridge` | `sensor_tf_bridge` | 动态 TF 广播 (base_link→sensor, 10Hz /tf) |
-| `pointcloud_filter` | `pointcloud_filter` | 距离+高度+角度过滤 |
-| `euclidean_cluster_3d` | `euclidean_cluster_3d` | 3D 体素洪水填充聚类 |
-| `cluster_analyzer` | `cluster_analyzer` | **PCA 链路**: PCA特征+4类规则+时序追踪+置信度 |
-| `voxel_analyzer` | `voxel_analyzer` | **体素链路**: 多分辨率网格+几何特征+体素聚类 |
-| `cluster_bbox` | `cluster_bbox` | 2D 包围盒生成 |
-| `obstacle_adapter` | `obstacle_adapter` | 语义适配+地图系静态 `tall` Track → `/obstacle_markers` |
-| `road_analyzer` | `road_analyzer` | 左右道路边界稳定融合+中心线(调试) |
-| `tf_publisher` | `tf_publisher` | rosbag 模式 TF 发布 |
-
-## 全部启动参数
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `input_source` | `rosbag` | 数据源: `rosbag` / `simulation` / `lidar` |
-| `use_3d_clustering` | `false` | 启用 3D 聚类 + PCA 分析（与 2D 并行） |
-| `cloud_topic` | `__auto__` | 输入点云话题（自动解析：rosbag→`/cx/lslidar_point_cloud`, sim/lidar→`/lidar/points`） |
-| `bag_dir` | `~/lidar3d_ws/bags` | [rosbag] rosbag2 目录 |
-| `rate` | `1.0` | [rosbag] 回放速率 |
-| `start_offset` | `0.0` | [rosbag] 跳过秒数 |
-| `loop` | `true` | [rosbag] 循环播放 |
-| `max_range` | `10.0` | 过滤最大距离 (m) |
-| `min_range` | `0.1` | 过滤最小距离 (m) |
-| `min_height` | `-3.0` | 过滤最低 Z (m) |
-| `max_height` | `5.0` | 过滤最高 Z (m) |
-| `sensor_height` | `1.5` | LiDAR 离地高度 (m) |
-| `enable_ground_seg` | `true` | 启用地面分割 + 下游节点 |
-
-## RViz 窗口
-
-启动时自动打开 2~3 个窗口：
-
-| 窗口名 | 配置文件 | 显示内容 |
-|--------|---------|---------|
-| `rviz2_raw` | `lidar3d_raw.rviz` | 过滤后原始点云 (`/cx/lslidar_point_cloud_filtered`) |
-| `rviz2_proc` | `lidar3d_processed.rviz` | 地面/非地面、2D 包围盒 |
-| `rviz2_3d` | `lidar3d_3d.rviz` | 3D 聚类点云、PCA 分类标记（PCA 模式） |
-| `rviz2_voxel` | `lidar3d_voxel.rviz` | 体素分类 (高/低置信)、地面/非地面（体素模式自动开启） |
-
-## 主要包
-
-| 包 | 说明 |
-|----|------|
-| `lidar3d_bringup` | 启动流程、TF、点云过滤、聚类、分类、障碍物适配 |
-| `lidar_cluster_ros2` | 2D 欧几里得聚类 (C++) |
-| `patchwork-plusplus` | Patchwork++ 地面分割 (C++) |
-
-## 第三方代码来源
-
-| 目录 | 来源 | 分支/版本 | 改动 |
-|------|------|-----------|------|
-| `src/patchwork-plusplus` | https://github.com/url-kaist/patchwork-plusplus | v1.4.1 (`3e6903a`) | 无 |
-| `src/lidar_cluster_ros2` | https://github.com/jkk-research/lidar_cluster_ros2 | ros2 (`17076fd`) | `euclidean_grid_core.hpp` 参数调整 |
-
-## 开发日志
-
-### 2026-07-29 (Session 2) — 3D 聚类 + 坡面-障碍物区分
-- 新增 `euclidean_cluster_3d.py`：3D 体素聚类（洪水填充，纯 numpy）
-- 新增 `cluster_analyzer.py`：PCA 特征提取 + 规则分类（slope/bump/pole/obstacle）
-- 新增 `lidar3d_3d.rviz`：3D 可视化配置
-- `obstacle_adapter.py`：新增 `input_topic` 参数，支持 2D/3D 链路切换
-- `play_and_viz.launch.py`：新增 `use_3d_clustering` 启动参数
-
-### 2026-07-29 (Session 1) — 仿真数据链路修复
-- 新建 `tf_bridge.py`：动态 TF 广播（`/tf`, 10Hz），替代 `static_transform_publisher`
-- `play_and_viz.launch.py`：`use_sim_time` 条件化, Patchwork++/adapter 帧名条件化
-- `obstacle_adapter.py`：`source_frame`/`target_frame` ROS 参数化
-- `pointcloud_filter.py`：BEST_EFFORT QoS 兼容 Gazebo bridge
-- BajaSimPart：合并 `v1.4-real_lqr` + 修复 NumPy/SciPy 兼容崩溃
-
-### 2026-07-27~28 (C14~C23) — Pipeline 搭建
-- C14~C18：集成欧几里得聚类 + bbox + 障碍物适配
-- C19~C20：多数据源切换 launch (rosbag/simulation/lidar)
-- C21~C23：仿真 TF 链路 + 调试记录
-
-## 依赖与环境
-
-- ROS 2 Humble (Ubuntu 22.04)
-- Python 3.10+, numpy
-- PCL / pcl_ros
-- colcon
+## 常用验证与调试
 
 ```bash
-cd ~/lidar3d_ws
-source /opt/ros/humble/setup.bash
-rosdep install --from-paths src --ignore-src -r -y
-colcon build --symlink-install
-source install/setup.bash
+# 必需输入/输出速率和语义快照
+ros2 topic hz /lidar/points
+ros2 topic hz /patchworkpp/nonground
+ros2 topic echo --once /obstacle_markers
+ros2 topic echo --once /road_boundary_markers
+
+# 检查仿真 sensor TF
+ros2 run tf2_ros tf2_echo base_link baja_vehicle/base_link/lidar
 ```
 
-## 常用调试
-
-```bash
-ros2 param set /pointcloud_filter max_range 30.0      # 动态调参
-ros2 node list                                           # 查看节点
-ros2 topic list                                          # 查看话题
-ros2 topic hz /cx/lslidar_point_cloud_filtered           # 过滤输出频率
-ros2 topic echo /obstacles/boxes_3d --once              # 3D 分类结果
-ros2 run tf2_ros tf2_echo base_link baja_vehicle/base_link/lidar  # TF 验证
-```
+检查坡面时，预期 `/obstacle_markers` 出现 `ns: flat_ground`，其 `text` 以
+`passable_slope apex_x=` 开头；检查障碍物时，预期 `ns: tall` 持续发布至车辆通过。
 
 ### 规划路径偏差离线诊断
 
@@ -209,3 +138,18 @@ python3 tools/analyze_planning_divergence_bag.py \
 ```
 
 该工具只定位路径锚点误差、路径跳变与同步感知输入；不修改 Baja planner/follower。
+
+## 构建与依赖
+
+```bash
+cd ~/lidar3d_ws
+source /opt/ros/humble/setup.bash
+rosdep install --from-paths src --ignore-src -r -y
+colcon build --symlink-install
+source install/setup.bash
+```
+
+- ROS 2 Humble（Ubuntu 22.04）
+- Python 3.10+、NumPy
+- PCL / pcl_ros、Patchwork++、Eigen3
+- `colcon`
