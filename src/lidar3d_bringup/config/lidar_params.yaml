@@ -39,7 +39,7 @@ pointcloud_filter:
     max_height: 5.0                  # 最高高度 (m)
 
     # 角度过滤 (方向性感知)
-    angle_limit_deg: 135.0           # 水平半角限制 (度)
+    angle_limit_deg: 150.0           # 水平半角限制 (度)
                                      # 135°=保留前方±135°(去后方90°)
                                      # 180°=全向360°扫描
 
@@ -77,6 +77,20 @@ surface_detector:
     # 剔除"高于median + k×MAD"的ground点，捕获为疑似障碍物参与检测。
     # ↓=捕获更多疑似障碍物(更敏感, 斜面上障碍物易检出), ↑=更宽松(抑制误检)
     ground_outlier_factor: 2.0
+
+    # ==== 坡面地形 (ground → flat_ground) ====
+    # 只使用 Patchwork++ 已确认的 ground 拟合局部纵向平面；不参与 tall 分类。
+    # `slope_min_grade_deg` 是传感器估计角度而非仿真配置坡角；小坡可按实测调低。
+    slope_grid_resolution_m: 0.5     # 地面高度栅格边长 (m)
+    slope_fit_radius_m: 1.5          # 每个局部平面拟合半径 (m)
+    slope_min_grade_deg: 1.5         # 最小纵向坡度 (deg)
+    slope_max_grade_deg: 18.0        # 最大可通行坡度 (deg)
+    slope_min_support_cells: 8       # 局部平面最少地面栅格数
+    slope_max_fit_rmse_m: 0.08       # 平面拟合最大均方根误差 (m)
+    slope_min_component_cells: 6     # 连续坡面最少栅格数
+    slope_min_span_x_m: 2.0          # 控制组可用的最小 x 向坡长 (m)
+    slope_min_forward_m: 0.5         # 仅发布车辆前方坡面起点 (m)
+    slope_max_forward_m: 30.0        # 坡面最远发布距离 (m)
 
     # ==== 近场曲面NaN修复 ====
     # Patchwork++盲区(min_range=1.0) + 16线近场(<5.6m)打不到地面 → 曲面NaN。

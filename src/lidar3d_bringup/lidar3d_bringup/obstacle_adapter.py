@@ -29,6 +29,13 @@ TYPE_COLORS = {
 }
 
 CONFIDENCE_PATTERN = re.compile(r'(?:^|\s)c=([0-9]+(?:\.[0-9]+)?)\b')
+SLOPE_METADATA_PATTERN = re.compile(
+    r'^(passable_slope\s+)'
+    r'apex_x=(?P<x>-?[0-9]+(?:\.[0-9]+)?)\s+'
+    r'apex_y=(?P<y>-?[0-9]+(?:\.[0-9]+)?)\s+'
+    r'apex_z=(?P<z>-?[0-9]+(?:\.[0-9]+)?)'
+    r'(?P<tail>.*)$'
+)
 
 
 @dataclass
@@ -331,7 +338,8 @@ class ObstacleAdapter(Node):
             marker_id: int,
             base_xyz: Tuple[float, float, float],
             scale_xyz: Tuple[float, float, float],
-            stamp) -> Marker:
+            stamp,
+            text: str = '') -> Marker:
         marker = Marker()
         marker.header.frame_id = self.target_frame
         marker.header.stamp = stamp
@@ -352,7 +360,29 @@ class ObstacleAdapter(Node):
         marker.color.b = blue
         marker.color.a = alpha
         marker.lifetime.nanosec = 200_000_000
+        marker.text = text
         return marker
+
+    def _transform_slope_metadata(
+            self,
+            source_text: str,
+            base_from_sensor: TransformStamped) -> str:
+        """Rewrite slope apex coordinates from the source frame into base_link."""
+        match = SLOPE_METADATA_PATTERN.match(source_text)
+        if match is None:
+            return source_text
+
+        apex_xyz = self._apply_transform(
+            base_from_sensor,
+            float(match.group('x')),
+            float(match.group('y')),
+            float(match.group('z')))
+        return (
+            f'{match.group(1)}'
+            f'apex_x={apex_xyz[0]:.2f} '
+            f'apex_y={apex_xyz[1]:.2f} '
+            f'apex_z={apex_xyz[2]:.2f}'
+            f'{match.group("tail")}')
 
     def callback(self, msg: MarkerArray):
         self._frame_count += 1
@@ -375,7 +405,13 @@ class ObstacleAdapter(Node):
                 'publishing current high-confidence tall observations only',
                 throttle_duration_sec=5.0)
 
-        current_flats: List[Tuple[int, Tuple[float, float, float], Tuple[float, float, float]]] = []
+        current_flats: List[Tuple[
+            int,
+            Tuple[float, float, float],
+            Tuple[float, float, float],
+            str,
+            bool,
+        ]] = []
         fallback_talls: List[Tuple[int, Tuple[float, float, float], Tuple[float, float, float]]] = []
 
         for marker in msg.markers:
@@ -391,7 +427,13 @@ class ObstacleAdapter(Node):
             scale_xyz = (marker.scale.x, marker.scale.y, marker.scale.z)
 
             if label == 'flat_ground':
-                current_flats.append((marker.id, base_xyz, scale_xyz))
+                is_slope = marker.text.startswith('passable_slope apex_x=')
+                flat_text = marker.text
+                if is_slope:
+                    flat_text = self._transform_slope_metadata(
+                        marker.text, base_from_sensor)
+                current_flats.append(
+                    (marker.id, base_xyz, scale_xyz, flat_text, is_slope))
                 continue
 
             confidence = self._confidence(marker)
@@ -431,14 +473,16 @@ class ObstacleAdapter(Node):
                 'tall', marker_id, base_xyz, scale_xyz, now))
             published_tall_positions.append((base_xyz[0], base_xyz[1]))
 
-        for marker_id, base_xyz, scale_xyz in current_flats:
+        for marker_id, base_xyz, scale_xyz, text, is_slope in current_flats:
             overlaps_tall = any(
                 math.hypot(base_xyz[0] - tall_x, base_xyz[1] - tall_y)
                 <= self.association_distance
                 for tall_x, tall_y in published_tall_positions)
-            if not overlaps_tall:
+            # A slope is terrain metadata for the controller, not a competing
+            # collision object.  Keep it even when a tall obstacle stands on it.
+            if is_slope or not overlaps_tall:
                 output.markers.append(self._make_marker(
-                    'flat_ground', marker_id, base_xyz, scale_xyz, now))
+                    'flat_ground', marker_id, base_xyz, scale_xyz, now, text))
 
         self.pub.publish(output)
 

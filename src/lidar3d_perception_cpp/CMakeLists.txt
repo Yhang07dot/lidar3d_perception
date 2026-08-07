@@ -16,6 +16,10 @@ find_package(visualization_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+endif()
+
 add_executable(surface_detector_node src/surface_detector_node.cpp)
 target_include_directories(surface_detector_node PRIVATE
   include
@@ -31,5 +35,14 @@ ament_target_dependencies(surface_detector_node
 install(TARGETS surface_detector_node
   DESTINATION lib/${PROJECT_NAME}
 )
+
+if(BUILD_TESTING)
+  ament_add_gtest(test_surface_detector_geometry
+    test/test_surface_detector_geometry.cpp)
+  target_include_directories(test_surface_detector_geometry PRIVATE
+    include
+    ${EIGEN3_INCLUDE_DIRS}
+  )
+endif()
 
 ament_package()

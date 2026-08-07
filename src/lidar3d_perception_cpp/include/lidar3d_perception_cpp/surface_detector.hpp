@@ -76,6 +76,214 @@ struct PolarGrid
   bool valid() const {return n_r > 0 && n_th > 0;}
 };
 
+struct SlopePatch
+{
+  Point3 center = Point3::Zero();
+  Point3 apex = Point3::Zero();
+  Point3 dims = Point3::Zero();
+  double max_grade_deg = 0.0;
+  int cell_count = 0;
+};
+
+// Extract connected uphill/downhill patches from points Patchwork++ already
+// accepted as ground.  Each Cartesian cell receives a local z=ax+by+c fit;
+// only the longitudinal derivative a is used for the slope grade so ordinary
+// road camber does not become a longitudinal terrain feature.  The result is
+// independent of the residual obstacle path below.
+inline std::vector<SlopePatch> detectSlopePatches(
+  const Cloud & ground,
+  double cell_size_m = 0.5,
+  double fit_radius_m = 1.5,
+  double min_grade_deg = 1.5,
+  double max_grade_deg = 18.0,
+  int min_support_cells = 8,
+  double max_fit_rmse_m = 0.08,
+  int min_component_cells = 6,
+  double min_span_x_m = 2.0,
+  double min_forward_m = 0.5,
+  double max_forward_m = 30.0)
+{
+  struct CellSamples
+  {
+    std::vector<Point3> points;
+  };
+  struct GroundCell
+  {
+    Point3 center = Point3::Zero();
+    double z = 0.0;
+  };
+
+  if (ground.empty() || cell_size_m <= 0.0 || fit_radius_m <= 0.0 ||
+      min_grade_deg < 0.0 || max_grade_deg <= min_grade_deg ||
+      min_support_cells < 3 || min_component_cells < 1 ||
+      min_span_x_m <= 0.0 || max_forward_m <= min_forward_m)
+  {
+    return {};
+  }
+
+  auto keyOf = [](int ix, int iy) -> int64_t {
+      return (static_cast<int64_t>(ix) << 32) ^ static_cast<uint32_t>(iy);
+    };
+  auto keyX = [](int64_t key) -> int {
+      return static_cast<int>(key >> 32);
+    };
+  auto keyY = [](int64_t key) -> int {
+      return static_cast<int>(static_cast<uint32_t>(key & 0xFFFFFFFF));
+    };
+
+  std::unordered_map<int64_t, CellSamples> sample_cells;
+  sample_cells.reserve(ground.size());
+  for (const auto & point : ground) {
+    if (point.x() < min_forward_m || point.x() > max_forward_m) {
+      continue;
+    }
+    const int ix = static_cast<int>(std::floor(point.x() / cell_size_m));
+    const int iy = static_cast<int>(std::floor(point.y() / cell_size_m));
+    sample_cells[keyOf(ix, iy)].points.push_back(point);
+  }
+
+  std::unordered_map<int64_t, GroundCell> cells;
+  cells.reserve(sample_cells.size());
+  for (auto & entry : sample_cells) {
+    auto & points = entry.second.points;
+    if (points.empty()) {
+      continue;
+    }
+    Point3 center = Point3::Zero();
+    std::vector<double> z_values;
+    z_values.reserve(points.size());
+    for (const auto & point : points) {
+      center += point;
+      z_values.push_back(point.z());
+    }
+    center /= static_cast<double>(points.size());
+    std::nth_element(
+      z_values.begin(), z_values.begin() + z_values.size() / 2, z_values.end());
+    cells.emplace(entry.first, GroundCell{center, z_values[z_values.size() / 2]});
+  }
+
+  const int radius_cells = std::max(
+    1, static_cast<int>(std::ceil(fit_radius_m / cell_size_m)));
+  std::unordered_map<int64_t, double> candidate_grades;
+  candidate_grades.reserve(cells.size());
+  for (const auto & entry : cells) {
+    const int ix = keyX(entry.first);
+    const int iy = keyY(entry.first);
+    std::vector<const GroundCell *> support;
+    support.reserve((2 * radius_cells + 1) * (2 * radius_cells + 1));
+    for (int dx = -radius_cells; dx <= radius_cells; ++dx) {
+      for (int dy = -radius_cells; dy <= radius_cells; ++dy) {
+        const auto neighbor = cells.find(keyOf(ix + dx, iy + dy));
+        if (neighbor == cells.end()) {
+          continue;
+        }
+        const Point3 delta = neighbor->second.center - entry.second.center;
+        if (delta.head<2>().norm() <= fit_radius_m) {
+          support.push_back(&neighbor->second);
+        }
+      }
+    }
+    if (static_cast<int>(support.size()) < min_support_cells) {
+      continue;
+    }
+
+    Eigen::MatrixXd matrix(support.size(), 3);
+    Eigen::VectorXd heights(support.size());
+    for (size_t index = 0; index < support.size(); ++index) {
+      matrix(index, 0) = support[index]->center.x();
+      matrix(index, 1) = support[index]->center.y();
+      matrix(index, 2) = 1.0;
+      heights(index) = support[index]->z;
+    }
+    const Eigen::Vector3d plane = matrix.colPivHouseholderQr().solve(heights);
+    const Eigen::VectorXd errors = matrix * plane - heights;
+    const double rmse = std::sqrt(errors.squaredNorm() / static_cast<double>(support.size()));
+    if (!std::isfinite(rmse) || rmse > max_fit_rmse_m) {
+      continue;
+    }
+
+    const double grade_deg = std::atan(std::abs(plane.x())) * 180.0 / M_PI;
+    if (grade_deg >= min_grade_deg && grade_deg <= max_grade_deg) {
+      candidate_grades.emplace(entry.first, grade_deg);
+    }
+  }
+
+  std::vector<SlopePatch> patches;
+  std::unordered_map<int64_t, bool> visited;
+  visited.reserve(candidate_grades.size());
+  for (const auto & entry : candidate_grades) {
+    if (visited[entry.first]) {
+      continue;
+    }
+    visited[entry.first] = true;
+    std::vector<int64_t> stack{entry.first};
+    std::vector<int64_t> component{entry.first};
+    while (!stack.empty()) {
+      const int64_t current = stack.back();
+      stack.pop_back();
+      const int ix = keyX(current);
+      const int iy = keyY(current);
+      for (int dx = -1; dx <= 1; ++dx) {
+        for (int dy = -1; dy <= 1; ++dy) {
+          if (dx == 0 && dy == 0) {
+            continue;
+          }
+          const int64_t neighbor = keyOf(ix + dx, iy + dy);
+          if (candidate_grades.count(neighbor) && !visited[neighbor]) {
+            visited[neighbor] = true;
+            stack.push_back(neighbor);
+            component.push_back(neighbor);
+          }
+        }
+      }
+    }
+
+    if (static_cast<int>(component.size()) < min_component_cells) {
+      continue;
+    }
+    Point3 sum = Point3::Zero();
+    Point3 apex = Point3::Zero();
+    bool have_apex = false;
+    double min_x = std::numeric_limits<double>::infinity();
+    double max_x = -std::numeric_limits<double>::infinity();
+    double min_y = std::numeric_limits<double>::infinity();
+    double max_y = -std::numeric_limits<double>::infinity();
+    double min_z = std::numeric_limits<double>::infinity();
+    double max_z = -std::numeric_limits<double>::infinity();
+    double component_max_grade = 0.0;
+    for (int64_t key : component) {
+      const GroundCell & cell = cells.at(key);
+      sum += cell.center;
+      if (!have_apex || cell.z > apex.z()) {
+        apex = cell.center;
+        have_apex = true;
+      }
+      min_x = std::min(min_x, cell.center.x());
+      max_x = std::max(max_x, cell.center.x());
+      min_y = std::min(min_y, cell.center.y());
+      max_y = std::max(max_y, cell.center.y());
+      min_z = std::min(min_z, cell.z);
+      max_z = std::max(max_z, cell.z);
+      component_max_grade = std::max(component_max_grade, candidate_grades.at(key));
+    }
+    const double span_x = max_x - min_x + cell_size_m;
+    if (span_x < min_span_x_m) {
+      continue;
+    }
+    SlopePatch patch;
+    patch.center = sum / static_cast<double>(component.size());
+    patch.apex = apex;
+    patch.dims = Point3(
+      span_x,
+      max_y - min_y + cell_size_m,
+      std::max(0.05, max_z - min_z));
+    patch.max_grade_deg = component_max_grade;
+    patch.cell_count = static_cast<int>(component.size());
+    patches.push_back(patch);
+  }
+  return patches;
+}
+
 // Port of _build_polar_grid(). Bins ground points into a polar grid.
 //
 // Grid spacing grows with range: dr = dr_base + dr_per_m * r

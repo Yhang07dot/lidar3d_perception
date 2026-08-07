@@ -81,6 +81,18 @@ public:
     // ==== Ground离群点过滤 (方案A) ====
     declare_parameter("ground_outlier_factor", 2.0);
 
+    // ==== Ground 坡面提取 ====
+    declare_parameter("slope_grid_resolution_m", 0.5);
+    declare_parameter("slope_fit_radius_m", 1.5);
+    declare_parameter("slope_min_grade_deg", 1.5);
+    declare_parameter("slope_max_grade_deg", 18.0);
+    declare_parameter("slope_min_support_cells", 8);
+    declare_parameter("slope_max_fit_rmse_m", 0.08);
+    declare_parameter("slope_min_component_cells", 6);
+    declare_parameter("slope_min_span_x_m", 2.0);
+    declare_parameter("slope_min_forward_m", 0.5);
+    declare_parameter("slope_max_forward_m", 30.0);
+
     // ==== 近场曲面不可靠修复 ====
     declare_parameter("nearfield_range", 6.0);
 
@@ -152,12 +164,26 @@ private:
       ground_z = sum / static_cast<double>(g.size());
     }
 
+    const auto slope_patches = lidar3d::detectSlopePatches(
+      g,
+      get_parameter("slope_grid_resolution_m").as_double(),
+      get_parameter("slope_fit_radius_m").as_double(),
+      get_parameter("slope_min_grade_deg").as_double(),
+      get_parameter("slope_max_grade_deg").as_double(),
+      static_cast<int>(get_parameter("slope_min_support_cells").as_int()),
+      get_parameter("slope_max_fit_rmse_m").as_double(),
+      static_cast<int>(get_parameter("slope_min_component_cells").as_int()),
+      get_parameter("slope_min_span_x_m").as_double(),
+      get_parameter("slope_min_forward_m").as_double(),
+      get_parameter("slope_max_forward_m").as_double());
+
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       grid_ = std::move(grid);
       surface_ = std::move(S);
       ground_outliers_ = std::move(outliers);
       ground_z_ = ground_z;
+      slope_patches_ = slope_patches;
       have_surface_ = true;
     }
 
@@ -198,6 +224,7 @@ private:
     lidar3d::PolarGrid grid;
     std::vector<double> S;
     Cloud outliers;
+    std::vector<lidar3d::SlopePatch> slope_patches;
     double ground_z = 0.0;
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
@@ -205,15 +232,55 @@ private:
       grid = grid_;
       S = surface_;
       outliers = ground_outliers_;
+      slope_patches = slope_patches_;
       ground_z = ground_z_;
     }
 
     ++frame_count_;
+    MarkerArray high, low;
+    const auto now = this->now();
+    for (size_t index = 0; index < slope_patches.size(); ++index) {
+      const auto & patch = slope_patches[index];
+      Marker marker;
+      marker.header.frame_id = msg->header.frame_id;
+      marker.header.stamp = now;
+      marker.ns = lidar3d::typeLabel(lidar3d::TYPE_PASSABLE_LOW);
+      marker.id = 100000 + static_cast<int>(index);
+      marker.type = Marker::CUBE;
+      marker.action = Marker::ADD;
+      marker.pose.position.x = patch.center.x();
+      marker.pose.position.y = patch.center.y();
+      marker.pose.position.z = patch.center.z();
+      marker.pose.orientation.w = 1.0;
+      marker.scale.x = patch.dims.x();
+      marker.scale.y = patch.dims.y();
+      marker.scale.z = patch.dims.z();
+      float red, green, blue, alpha;
+      lidar3d::typeColor(lidar3d::TYPE_PASSABLE_LOW, red, green, blue, alpha);
+      marker.color.r = red;
+      marker.color.g = green;
+      marker.color.b = blue;
+      marker.color.a = alpha;
+      char text[256];
+      snprintf(
+        text, sizeof(text),
+        "passable_slope apex_x=%.2f apex_y=%.2f apex_z=%.2f span_x=%.2f "
+        "grade_deg=%.2f cells=%d c=1.00",
+        patch.apex.x(), patch.apex.y(), patch.apex.z(), patch.dims.x(),
+        patch.max_grade_deg, patch.cell_count);
+      marker.text = text;
+      marker.lifetime = rclcpp::Duration(0, 300000000);
+      high.markers.push_back(marker);
+    }
+
     Cloud xyz = pc2ToXyz(*msg);
 
     // 方案A: merge points that Patchwork++ mis-assigned to ground
     xyz.insert(xyz.end(), outliers.begin(), outliers.end());
-    if (xyz.size() < 20) {return;}
+    if (xyz.size() < 20) {
+      pub_boxes_->publish(high);
+      return;
+    }
 
     // residual analysis with near-field unreliable-surface repair
     const double nearfield_range = get_parameter("nearfield_range").as_double();
@@ -240,7 +307,10 @@ private:
 
     const auto clusters = lidar3d::clusterResidualPts(
       xyz, residuals, thresholds, get_parameter("min_cluster_pts").as_int());
-    if (clusters.empty()) {return;}
+    if (clusters.empty()) {
+      pub_boxes_->publish(high);
+      return;
+    }
 
     // classify each cluster
     std::vector<lidar3d::Classification> infos;
@@ -266,9 +336,7 @@ private:
     const int log_interval = static_cast<int>(get_parameter("log_interval").as_int());
     const bool do_log = (log_interval > 0) && (frame_count_ % log_interval == 0);
 
-    MarkerArray high, low;
     std::string log_line;
-    const auto now = this->now();
 
     for (size_t i = 0; i < infos.size(); ++i) {
       const auto & info = infos[i];
@@ -330,6 +398,7 @@ private:
   lidar3d::PolarGrid grid_;
   std::vector<double> surface_;
   Cloud ground_outliers_;
+  std::vector<lidar3d::SlopePatch> slope_patches_;
   double ground_z_ = 0.0;
   bool have_surface_ = false;
 

@@ -45,6 +45,9 @@ ros2 launch lidar3d_bringup play_and_viz.launch.py enable_ground_seg:=false
   空帧、短暂误分类和近场盲区中持续发布，车辆通过后才释放。
 - `road_analyzer` 独立提取左右道路边界。当前帧可靠边界优先，地图缓存只补缺失 bin，
   从而避免避障姿态变化把历史直线段和当前边界混合成锯齿。
+- `surface_detector` 还会从 Patchwork++ 已确认的 ground 点拟合连续纵向坡面；坡面以
+  `flat_ground` 发送给控制端，`Marker.text` 提供顶点与 `x` 向长度，tall 障碍物路径不参与
+  该判断也不会被坡面覆盖。
 - 详细的坐标变换、置信度门槛、Track 生命周期和边界连续性规则见
   [`PERCEPTION_ALGORITHM.md`](PERCEPTION_ALGORITHM.md)。
 

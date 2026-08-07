@@ -92,6 +92,30 @@ residual = z_point - S(r, theta)
 综合点数、几何特征和时序历史，低于 `confidence_threshold` 的结果仅发往低
 置信调试 topic。
 
+### 4.3 从 ground 提取坡面 `flat_ground`
+
+坡面不再从 residual 簇的整体标签推断：坡面与坡上的高障碍物在二维连通聚类中可能属于同一
+簇，先将整个簇放行为可通过会漏掉真正的 `tall`。因此 `tall` 仍完全沿用 Layer 2 的
+`nonground + ground_outlier` 残差路径；坡面则只使用 Patchwork++ 已经判为 `ground` 的点。
+
+地面点以 `slope_grid_resolution_m` 建成笛卡尔高度栅格。每个格在
+`slope_fit_radius_m` 邻域拟合局部平面 `z = ax + by + c`，仅用纵向导数 `a` 得到局部
+坡度，避免横向路拱被当作纵向坡。通过 `slope_min_grade_deg`、平面 RMS 与连续栅格数量后，
+相邻坡格合并成一个坡面区域。该判定使用传感器实际地面几何，不依赖仿真 `scenario.json`、
+道路中心线或固定水平 FOV。
+
+一个坡面区域以 source `Marker.CUBE` 发布：`pose` 是区域中心，`scale.x` 是控制端可直接
+使用的车辆前向长度 `span_x`，`scale.y/z` 为横向范围和高度范围。`text` 的格式固定为：
+
+```text
+passable_slope apex_x=<m> apex_y=<m> apex_z=<m> span_x=<m>
+grade_deg=<deg> cells=<count> c=1.00
+```
+
+source topic 中 apex 在点云坐标系；adapter 发布 `/obstacle_markers` 时将 apex 转到
+`base_link`，并保留其余字段。最终 marker 的 `ns=flat_ground`，`pose`/`scale` 同样在
+`base_link`；坡上存在 `tall` 时该地形元数据仍会同时发布，供控制端独立决定减速时机。
+
 ## 5. 障碍物适配与静态 `tall` Track：`obstacle_adapter`
 
 实现：`src/lidar3d_bringup/lidar3d_bringup/obstacle_adapter.py`。
