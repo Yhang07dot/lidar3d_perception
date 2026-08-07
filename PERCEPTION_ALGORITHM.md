@@ -278,12 +278,18 @@ y_center(x) = (interpolate(y_left, x) + interpolate(y_right, x)) / 2
 |---|---|---|
 | `/reference_centerline` | `truth_perception_node` | 全局行驶方向与 Frenet 参考 |
 | `/gps/fix`、`/imu/yaw` | `truth_perception_node` | 仿真定位与航向 |
-| `/road_boundary_markers` | `road_analyzer` | LiDAR 道路横向走廊约束 |
+| `/road_boundary_markers` | `road_analyzer`（目标） | LiDAR 道路横向走廊约束 |
 | `/obstacle_markers` | `obstacle_adapter` | LiDAR 障碍物避让/降速 |
 
 因此，车辆是否可走和如何绕开障碍物由感知结果决定；全局赛道走向暂时仍由真值
 中心线提供。要进入方案 B，需将感知中心线稳定变换到 `map` 并替代
 `/reference_centerline`，同时引入非真值定位源。
+
+当前 Baja v2.2 有一项待控制组处理的路由冲突：`truth_perception_node` 仍向
+`/road_boundary_markers` 发布边界真值，而本工作区在 `perception_mode=lidar` 下也将
+`road_analyzer` 发布到同名 topic。二者会成为同一 topic 的两个发布者，planner 可能交替
+使用真值和 LiDAR 边界。正式 LiDAR 联调前必须关闭/重映射真值边界发布；保留 truth 的
+GPS、IMU、里程计和 `/reference_centerline` 不受此要求影响。
 
 ## 8. 运行时验收
 
@@ -364,3 +370,15 @@ grade_deg=<deg> cells=<count> c=1.00
 `ns=road_right` 的 `LINE_STRIP`。消息坐标系为 `base_link`，`points` 是相对 marker
 `pose` 的折线点。Frenet planner 使用它收紧横向走廊；`/lidar/centerline` 只作调试，
 当前全局行驶方向仍来自 `/reference_centerline`。
+
+### 9.4 Baja 控制侧已完成的感知接入
+
+当前 Baja v2.2 的接口基础已经具备：Gazebo 车体包含 10 Hz `gpu_lidar`，其
+`PointCloud2` 经 `ros_gz_bridge` 到 `/lidar/points`；`truth_perception_node` 已停止发布
+`/obstacle_markers`，因此障碍物完全来自本工作区的 LiDAR 链。
+
+`frenet_planner_node` 订阅 `/obstacle_markers` 与 `/road_boundary_markers`，仅 `tall`
+进入横向走廊避障；`path_follower_node` 订阅同一障碍 topic，对 `flat_ground` 按
+`pose.x ± scale.x / 2` 做纵向降速，并接收 planner 的 `/metrics/planned_clearance` 供安全
+状态机使用。`mock_perception_node` 只是无 LiDAR 的接口测试工具，真实 LiDAR 联调时不得
+同时运行。

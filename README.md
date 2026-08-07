@@ -46,6 +46,31 @@ ros2 launch lidar3d_bringup lidar_sim.launch.py
   误分类和近场盲区不会删除已确认 Track，车辆通过后才释放。
 - `road_analyzer` 的当前可靠边界优先，map 空间缓存只补缺失 bin；规划器据此收紧横向走廊。
 
+## 控制侧已完成的接入工作（Baja v2.2）
+
+以下改动位于 `~/baja_cloud_sim-2.2`，控制组基于最新代码接入时应保留：
+
+| 已完成工作 | Baja 位置 | 当前作用 |
+|------------|-----------|----------|
+| Gazebo GPU LiDAR | `src/baja_cloud_sim/models/baja_vehicle/model.sdf` | 车体安装 `gpu_lidar`，位姿 `(0.5, 0, 1.5)`，10 Hz 发布 Gazebo 点云。 |
+| ROS 点云桥接 | `src/baja_cloud_sim/config/bridge.yaml` | 将 Gazebo `/lidar/points/points` 桥接为 ROS `/lidar/points`，类型为 `sensor_msgs/msg/PointCloud2`。 |
+| 真实感知替代障碍真值 | `truth_perception_node.py` | 不再发布 `/obstacle_markers`；障碍盒和边缘轮胎只由 LiDAR 感知链发布。 |
+| 横向规划接入 | `frenet_planner_node.py` | 订阅 `/obstacle_markers` 和 `/road_boundary_markers`；仅 `tall` 进入横向避障，边界用于收紧可行走廊。 |
+| 纵向控制接入 | `path_follower_node.py` | 订阅 `/obstacle_markers`；`flat_ground` 按 `pose.x` 与 `scale.x` 渐进降速，不横向绕行。 |
+| 安全状态机联动 | `frenet_planner_node.py` → `path_follower_node.py` | planner 发布 `/metrics/planned_clearance`，follower 接入后使 `EMERGENCY` / `SLOWDOWN` clearance 守卫生效。 |
+
+**当前必须处理的边界路由风险**：`truth_perception_node` 仍向
+`/road_boundary_markers` 发布边界真值，而 `lidar_sim.launch.py` 默认也将 `road_analyzer`
+的 LiDAR 边界映射到该 topic。因此当前仿真会有 **2 个发布者**，planner 回调可能交替收到
+真值和 LiDAR 边界。正式控制联调的目标状态应为：
+
+- 保留 truth 的 `/gps/fix`、`/imu/yaw`、`/ground_truth/odom` 和 `/reference_centerline`；
+- 仅保留 `road_analyzer` 作为 `/road_boundary_markers` 发布者，或把真值边界改到
+  `/truth/road_boundary_markers`；
+- 不在本工作区同时启动 `mock_perception`，它只用于无 LiDAR 时验证控制消息契约。
+
+本次文档更新不修改 Baja 控制代码；控制组接入最新版本时应先完成上述单发布者路由调整。
+
 ## 节点状态：正式链路与不要启动项
 
 | 节点 | 当前状态 | 原因 |
@@ -123,6 +148,45 @@ ros2 run tf2_ros tf2_echo base_link baja_vehicle/base_link/lidar
 
 检查坡面时，预期 `/obstacle_markers` 出现 `ns: flat_ground`，其 `text` 以
 `passable_slope apex_x=` 开头；检查障碍物时，预期 `ns: tall` 持续发布至车辆通过。
+
+### 控制联调终端与状态检查
+
+```bash
+# 在需要同时使用 Baja 控制代码和 LiDAR 感知工具的终端执行
+source /opt/ros/humble/setup.bash
+source ~/baja_cloud_sim-2.2/install/setup.bash
+source ~/lidar3d_ws/install/setup.bash
+
+# 核查 LiDAR 感知是否真正接管控制接口
+ros2 topic info -v /lidar/points
+ros2 topic info -v /obstacle_markers
+ros2 topic info -v /road_boundary_markers
+ros2 topic echo --once /planner/status
+ros2 topic echo --once /cmd_control
+
+# 查看当前 follower 使用的 flat_ground 默认减速参数
+ros2 param get /path_follower_node obstacle_classes.flat_ground.approach_distance
+ros2 param get /path_follower_node obstacle_classes.flat_ground.slow_speed
+```
+
+`/obstacle_markers` 应只有 adapter 这一个发布者；当前代码下
+`/road_boundary_markers` 会显示 2 个发布者，这正是上文需要由控制组消除的路由冲突。
+
+### 当前联调录包
+
+```bash
+ros2 bag record -o ~/rosbags/control_integration_$(date +%Y%m%d_%H%M%S) \
+  /lidar/points \
+  /cx/lslidar_point_cloud_filtered \
+  /patchworkpp/ground \
+  /patchworkpp/nonground \
+  /obstacles/boxes_3d_surface \
+  /obstacle_markers \
+  /road_boundary_markers \
+  /planned_path \
+  /ground_truth/odom \
+  /tf /tf_static
+```
 
 ### 规划路径偏差离线诊断
 
